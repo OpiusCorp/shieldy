@@ -900,7 +900,8 @@ async function generateAgentReply(incident, userMessage) {
           systemInstruction: systemPrompt,
           temperature: 0.35,
           topP: 0.9,
-          maxOutputTokens: 640,
+          maxOutputTokens: 2048,
+          thinkingConfig: { thinkingBudget: 0 },
           responseMimeType: "application/json",
           responseJsonSchema: AGENT_REPLY_RESPONSE_SCHEMA
         }
@@ -945,7 +946,8 @@ async function generateAgentReply(incident, userMessage) {
         systemInstruction: "You are a calm emergency assistant. Output only the requested JSON object.",
         temperature: 0.2,
         topP: 0.8,
-        maxOutputTokens: 640,
+        maxOutputTokens: 2048,
+        thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: "application/json",
         responseJsonSchema: AGENT_REPLY_RESPONSE_SCHEMA
       }
@@ -1225,13 +1227,14 @@ async function generateAgentLiveUpdates(incident) {
     JSON.stringify(snapshot)
   ].filter(Boolean).join("\n");
 
-  const askModel = (userPrompt, maxOutputTokens = 640) => generateWithModelFallback(() => ({
+  const askModel = (userPrompt, maxOutputTokens = 2048) => generateWithModelFallback(() => ({
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
         config: {
           systemInstruction: "Return only the requested JSON array of strings. Be concise, factual, and naturally worded. Do not invent official responder movement or blocked exits.",
           temperature: 0.35,
           topP: 0.9,
           maxOutputTokens,
+          thinkingConfig: { thinkingBudget: 0 },
           responseMimeType: "application/json",
           responseJsonSchema: LIVE_UPDATES_RESPONSE_SCHEMA
         }
@@ -1239,7 +1242,7 @@ async function generateAgentLiveUpdates(incident) {
 
   let lastRawText = "";
   try {
-    const { model, payload } = await askModel(prompt, 640);
+    const { model, payload } = await askModel(prompt, 2048);
     const rawText = payload?.candidates?.[0]?.content?.parts
       ?.map((part) => part?.text || "")
       .join("\n")
