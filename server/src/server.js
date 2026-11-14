@@ -1,6 +1,15 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { GoogleGenAI } from "@google/genai";
+import {
+  haversineMeters,
+  triangulateTdoa,
+  mergeVote,
+  rankZones,
+  isSameShot,
+  buildShotTimeline,
+  describeTimeline
+} from "./meshAnalysis.js";
 
 const PORT = Number.parseInt(process.env.PORT || "8787", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -392,8 +401,10 @@ function policeBriefFor(incident) {
     : "location unavailable";
   const zones = incident.zones.length ? incident.zones.join(", ") : "zone unavailable";
   const confirmed = incident.confirmedByNodes.length || 0;
+  const timeline = incident.shots?.length ? buildShotTimeline(incident.shots) : null;
   return [
     `EchoShield incident ${incident.id}: ${incident.status}.`,
+    timeline ? describeTimeline(timeline) : "",
     `Observed by ${incident.devices.length} device(s), confirmed by ${confirmed} node(s).`,
     `Location: ${location}. Zone: ${zones}.`,
     incident.routes.length ? `Route guidance: ${incident.routes.join(", ")}.` : "",
@@ -552,6 +563,8 @@ function incidentSnapshotForAgent(incident) {
     location: incident.location,
     zones: incident.zones,
     routes: incident.routes,
+    // Lets the assistant answer "where is the shooter?" from detected shots only.
+    shotTimeline: incident.shots?.length ? describeTimeline(buildShotTimeline(incident.shots)) : null,
     notes: latestNotes,
     observations: latestObservations,
     authorityMessages: latestChat
@@ -728,6 +741,14 @@ function orderedModelCandidates() {
   return ordered;
 }
 
+function modelSupportsThinking(model) {
+  const match = /^gemini-(\d+)(?:\.(\d+))?/.exec(String(model || ""));
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2] || 0);
+  return major > 2 || (major === 2 && minor >= 5);
+}
+
 async function generateWithModelFallback(requestBodyBuilder) {
   if (!geminiClient) {
     throw new Error("Gemini SDK client unavailable: missing GEMINI_API_KEY/GOOGLE_API_KEY");
@@ -748,6 +769,12 @@ async function generateWithModelFallback(requestBodyBuilder) {
 
     try {
       const requestBody = requestBodyBuilder();
+      // Only 2.5-and-later models accept a thinking budget; older fallbacks reject the
+      // field outright, which would turn a rate-limit fallback into a hard failure.
+      if (requestBody?.config?.thinkingConfig && !modelSupportsThinking(model)) {
+        requestBody.config = { ...requestBody.config };
+        delete requestBody.config.thinkingConfig;
+      }
       logGeminiRequest(model, requestBody);
       const payload = await geminiClient.models.generateContent({
         model,
@@ -1003,6 +1030,10 @@ function generateHeuristicLiveUpdates(incident) {
     push(incident.routes[0] ? `Evacuation route reported: ${incident.routes[0]}.` : "Evacuation signal received; route details pending.");
   } else if (incident.status === "CLEARED") {
     push("All-clear signal received from the mesh.");
+  }
+  const timeline = incident.shots?.length ? buildShotTimeline(incident.shots) : null;
+  if (timeline) {
+    push(describeTimeline(timeline));
   }
   if (incident.location) {
     push(`Reported shot origin: ${incident.location.latitude.toFixed(5)}, ${incident.location.longitude.toFixed(5)}.`);
@@ -1440,8 +1471,13 @@ function publicIncident(incident) {
   const effectiveLiveUpdates = storedLiveUpdates.length
     ? storedLiveUpdates
     : generateHeuristicLiveUpdates(incident);
+  // Recompute so "seconds since last shot" and active/lull are current at read time.
+  const timeline = incident.shots?.length ? buildShotTimeline(incident.shots) : null;
   return {
     ...incident,
+    shots: undefined,
+    timeline,
+    timelineSummary: describeTimeline(timeline),
     observationCount: incident.observations.length,
     authorityMessageCount: incident.authorityMessages.length,
     firstAid: firstAidGuidance(incident),
@@ -1748,6 +1784,39 @@ function dispatchHtml(selectedIncidentId = null) {
        <p class="disclaimer">${escapeHtml(firstAid.disclaimer)}</p>`
     : "";
 
+  const METHOD_LABELS = { tdoa_multilateration: "Arrival-time fix", weighted_centroid: "Cluster centre", single_report: "Single phone" };
+  const timeline = selected?.shots?.length ? buildShotTimeline(selected.shots) : null;
+  const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const shotRows = timeline
+    ? timeline.shots.slice().reverse().map((shot, index) => `
+        <tr>
+          <td>${timeline.shotCount - index}</td>
+          <td>${escapeHtml(clock(shot.atMs))}</td>
+          <td>${escapeHtml(shot.zone || "—")}${shot.zoneConfidence ? ` <small>(${escapeHtml(shot.zoneConfidence)})</small>` : ""}</td>
+          <td>${shot.latitude !== null ? `${shot.latitude.toFixed(5)}, ${shot.longitude.toFixed(5)}` : "—"}</td>
+          <td>${escapeHtml(METHOD_LABELS[shot.method] || shot.method || "—")}</td>
+          <td>${shot.confirmedBy}</td>
+        </tr>`).join("")
+    : "";
+  const latestRanking = selected?.shots?.length
+    ? selected.shots.slice().sort((a, b) => b.atMs - a.atMs)[0].zoneRanking
+    : null;
+  const rankingRows = latestRanking
+    ? latestRanking.zones.slice(0, 5).map((zone) => `
+        <li><strong>${escapeHtml(zone.zone)}</strong> — score ${zone.score.toFixed(2)}, ${zone.heard}/${zone.phones} phones heard it${zone.peakDbfs !== null ? `, median ${zone.peakDbfs} dBFS` : ""}</li>`).join("")
+    : "";
+  const timelinePanel = timeline
+    ? `<div class="panel timeline">
+         <h2>Shot timeline <small class="${timeline.status === "active_fire" ? "hot" : "calm"}">${timeline.status === "active_fire" ? "ACTIVE FIRE" : "LULL"}</small></h2>
+         <p class="brief">${escapeHtml(describeTimeline(timeline))}</p>
+         <div class="tablewrap"><table>
+           <thead><tr><th>#</th><th>Time</th><th>Room</th><th>Position</th><th>Method</th><th>Phones</th></tr></thead>
+           <tbody>${shotRows}</tbody>
+         </table></div>
+         ${rankingRows ? `<h3>Latest shot — room ranking</h3><ol class="ranking">${rankingRows}</ol>` : ""}
+       </div>`
+    : "";
+
   const liveUpdateRows = (selected?.liveUpdates || [])
     .slice()
     .reverse()
@@ -1765,7 +1834,7 @@ function dispatchHtml(selectedIncidentId = null) {
     body { margin: 0; font-family: system-ui, sans-serif; background: #eef1f5; color: #121820; }
     header { background: #121820; color: white; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
     header a { color: #9ad0ff; }
-    main { display: grid; grid-template-columns: 280px 1fr 360px; min-height: calc(100vh - 64px); }
+    main { display: grid; grid-template-columns: 280px minmax(0, 1fr) 360px; min-height: calc(100vh - 64px); }
     nav { border-right: 1px solid #d5dae3; background: white; padding: 16px; }
     nav a { display: block; color: #121820; text-decoration: none; padding: 12px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #e3e6ec; }
     nav a.selected { border-color: #1b73e8; background: #eaf2ff; }
@@ -1784,6 +1853,13 @@ function dispatchHtml(selectedIncidentId = null) {
     button.secondary { background: #455469; }
     .brief { line-height: 1.45; }
     .empty { color: #5c6777; }
+    .tablewrap { overflow-x: auto; }
+    aside .panel { overflow-wrap: anywhere; }
+    .timeline table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 8px; }
+    .timeline th, .timeline td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e3e6ec; }
+    .timeline small.hot { background: #fde2e1; color: #b3261e; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+    .timeline small.calm { background: #e6f4ea; color: #1e6b3a; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+    .ranking li { margin-bottom: 4px; }
     @media (max-width: 980px) { main { grid-template-columns: 1fr; } nav { border-right: 0; border-bottom: 1px solid #d5dae3; } }
   </style>
 </head>
@@ -1809,6 +1885,7 @@ function dispatchHtml(selectedIncidentId = null) {
             <button type="button" id="clearNotificationsBtn">Clear Notifications for Incident</button>
           </p>
         </div>
+        ${timelinePanel}
         <div class="chat" id="chat">
           ${chatRows || '<p class="empty">No authority messages yet.</p>'}
         </div>
@@ -1929,14 +2006,11 @@ const MESH_QUORUM_FRACTION = 0.34;          // fraction of the fleet that must c
 const MESH_MAX_REQUIRED_CONFIRMATIONS = 5;  // cap so large fleets need not be unanimous
 const MESH_FLOOR_HEIGHT_METERS = 3.5;       // nominal storey height for floor offset
 const MESH_VOTE_WINDOW_MS = 6000;           // how long a detection session accepts votes
-const SPEED_OF_SOUND_MPS = 343;             // for TDoA travel-time computation
-// Arrivals spread wider than this cannot be one indoor acoustic event (sound crosses
-// a large building in well under a second), so the clocks are not comparable.
-const MESH_MAX_ARRIVAL_SPREAD_MS = 1500;
-// 0.343 m per ms: 60 ms of clock error is already ~20 m of ranging error.
-const MESH_MAX_TIMING_UNCERTAINTY_MS = 60;
-// Below this, the confirming phones give the solve no geometric leverage.
-const MESH_MIN_BASELINE_METERS = 4;
+// Physical limits for localization (speed of sound, clock tolerance, baseline) live
+// in meshAnalysis.js, alongside the solver that uses them.
+// A confirmed shot joins the open mesh incident if that incident saw activity within
+// this window; otherwise it starts a new one.
+const MESH_INCIDENT_WINDOW_MS = 15 * 60 * 1000;
 
 // deviceId -> { res, lastSeen, latitude, longitude, platform }
 const meshDevices = new Map();
@@ -1973,16 +2047,6 @@ function authenticateMeshWrite(req, deviceId) {
   return authorization === `Bus ${entry.busToken}`;
 }
 
-function haversineMeters(lat1, lon1, lat2, lon2) {
-  const R = 6371000;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
 /**
  * How many independent confirmations are needed before the fleet responds.
  *
@@ -2013,75 +2077,6 @@ function meshBroadcast(event, data, exceptDeviceId = null) {
       meshDevices.delete(deviceId);
     }
   }
-}
-
-// Coarse TDoA multilateration by grid search. Given confirming devices with positions
-// and audio arrival timestamps on a *shared* clock, the true source is the point that
-// makes (arrival_i - travelTime_i) constant across devices (that constant is the common
-// clock offset). We search a grid around the centroid and pick the point minimising the
-// variance of that quantity. Returns null when there is not enough synchronised timing
-// data, so the caller falls back to the confidence-weighted centroid.
-function triangulateTdoa(located) {
-  // A timestamp is only usable when we also know how well the reporting device's
-  // clock is aligned to ours; an unqualified timestamp must never be treated as good.
-  const timed = located.filter(
-    (v) =>
-      Number.isFinite(v.detectedAtMs) &&
-      Number.isFinite(v.timingUncertaintyMs) &&
-      v.timingUncertaintyMs <= MESH_MAX_TIMING_UNCERTAINTY_MS
-  );
-  if (timed.length < 3) return null;
-
-  const arrivals = timed.map((v) => v.detectedAtMs);
-  const spread = Math.max(...arrivals) - Math.min(...arrivals);
-  if (spread > MESH_MAX_ARRIVAL_SPREAD_MS) return null;
-
-  const lat0 = timed.reduce((s, v) => s + v.latitude, 0) / timed.length;
-  const lon0 = timed.reduce((s, v) => s + v.longitude, 0) / timed.length;
-  const mPerDegLat = 111320;
-  const mPerDegLon = 111320 * Math.cos((lat0 * Math.PI) / 180);
-  const pts = timed.map((v) => ({
-    x: (v.longitude - lon0) * mPerDegLon,
-    y: (v.latitude - lat0) * mPerDegLat,
-    t: v.detectedAtMs / 1000 // seconds
-  }));
-
-  // Without a baseline between the listeners there is nothing to triangulate from.
-  const baseline = Math.max(
-    ...pts.map((a) => Math.max(...pts.map((b) => Math.hypot(a.x - b.x, a.y - b.y))))
-  );
-  if (baseline < MESH_MIN_BASELINE_METERS) return null;
-
-  // Sweep for the point where `arrival - travelTime` is most nearly constant across
-  // listeners: coarse first, then a fine pass inside the winning cell.
-  const sweep = (cx, cy, range, step) => {
-    let best = null;
-    for (let gx = cx - range; gx <= cx + range; gx += step) {
-      for (let gy = cy - range; gy <= cy + range; gy += step) {
-        const offsets = pts.map((p) => p.t - Math.hypot(p.x - gx, p.y - gy) / SPEED_OF_SOUND_MPS);
-        const mean = offsets.reduce((s, o) => s + o, 0) / offsets.length;
-        const variance = offsets.reduce((s, o) => s + (o - mean) ** 2, 0) / offsets.length;
-        if (!best || variance < best.variance) best = { gx, gy, variance };
-      }
-    }
-    return best;
-  };
-
-  let best = sweep(0, 0, 150, 5);
-  if (!best) return null;
-  best = sweep(best.gx, best.gy, 5, 0.5) || best;
-
-  const residualMs = Math.sqrt(best.variance) * 1000;
-  // The fit must be consistent with how well the clocks are actually known.
-  const tolerance = Math.max(10, Math.max(...timed.map((v) => v.timingUncertaintyMs)) * 2);
-  if (residualMs > tolerance) return null;
-
-  return {
-    latitude: lat0 + best.gy / mPerDegLat,
-    longitude: lon0 + best.gx / mPerDegLon,
-    method: "tdoa_multilateration",
-    timingResidualMs: Number(residualMs.toFixed(1))
-  };
 }
 
 // Estimate the source from all confirming votes. Prefers TDoA when synchronised timing
@@ -2121,6 +2116,77 @@ function meshEstimateSource(session) {
   return { ...base, floorOffset, spreadMeters, contributingNodes: located.length };
 }
 
+// The open mesh incident a newly confirmed shot belongs to: a second shot a minute
+// later is the same event, and responders need one timeline, not one incident per shot.
+function activeMeshIncident(nowMs) {
+  return [...incidents.values()]
+    .filter((incident) => incident.id.startsWith("incident-mesh-") && incident.status !== "CLEARED")
+    .filter((incident) => nowMs - incident.lastObservedAtMs <= MESH_INCIDENT_WINDOW_MS)
+    .sort((a, b) => b.lastObservedAtMs - a.lastObservedAtMs)[0] || null;
+}
+
+// When the shot happened on the shared clock: the earliest arrival any confirming
+// device measured, falling back to when the session opened.
+function sessionShotTimeMs(session) {
+  const timed = [...session.votes.values()].filter(
+    (v) => v.isGunshot && Number.isFinite(v.detectedAtMs) && Number.isFinite(v.timingUncertaintyMs)
+  );
+  return timed.length ? Math.min(...timed.map((v) => v.detectedAtMs)) : session.startedAtMs;
+}
+
+// Create or update this session's shot on the incident, then recompute the timeline.
+// Sessions raised by different phones for the same shot merge into one entry.
+function meshUpdateShot(session, incident) {
+  const votes = [...session.votes.values()];
+  const candidate = {
+    atMs: sessionShotTimeMs(session),
+    estimate: session.lastEstimate || null,
+    zoneRanking: rankZones(votes),
+    confirmedBy: votes.filter((v) => v.isGunshot).map((v) => v.deviceId),
+    sessionIds: [session.sessionId]
+  };
+  incident.shots = incident.shots || [];
+
+  let shot = session.shotId ? incident.shots.find((s) => s.shotId === session.shotId) : null;
+  if (!shot) {
+    shot = incident.shots.find((s) => isSameShot(s, candidate)) || null;
+  }
+  if (shot) {
+    // A shot heard by more phones gets the better of the two views of it.
+    const better = (candidate.confirmedBy.length >= shot.confirmedBy.length) ||
+      (candidate.estimate?.method === "tdoa_multilateration" && shot.estimate?.method !== "tdoa_multilateration");
+    if (better || shot.sessionIds.includes(session.sessionId)) {
+      shot.estimate = candidate.estimate || shot.estimate;
+      shot.zoneRanking = candidate.zoneRanking || shot.zoneRanking;
+    }
+    shot.atMs = Math.min(shot.atMs, candidate.atMs);
+    candidate.confirmedBy.forEach((id) => addUnique(shot.confirmedBy, id));
+    addUnique(shot.sessionIds, session.sessionId);
+  } else {
+    shot = { shotId: `shot-${crypto.randomUUID().slice(0, 8)}`, ...candidate };
+    incident.shots.push(shot);
+  }
+  session.shotId = shot.shotId;
+
+  incident.timeline = buildShotTimeline(incident.shots);
+  incident.zoneRanking = incident.timeline?.latest?.shotId === shot.shotId
+    ? shot.zoneRanking
+    : incident.zoneRanking;
+  if (shot.zoneRanking?.topZone) addUnique(incident.zones, shot.zoneRanking.topZone);
+  incident.policeBrief = policeBriefFor(incident);
+  incident.updatedAt = nowIso();
+
+  meshBroadcast("shot_timeline", {
+    incidentId: incident.id,
+    shotId: shot.shotId,
+    zoneRanking: shot.zoneRanking,
+    timeline: incident.timeline,
+    summary: describeTimeline(incident.timeline),
+    timestamp: nowIso()
+  });
+  return shot;
+}
+
 function meshEvaluateSession(session) {
   const confirmed = [...session.votes.values()].filter((v) => v.isGunshot);
   const independent = confirmed.filter((v) => v.deviceId !== session.sourceDeviceId);
@@ -2137,8 +2203,9 @@ function meshEvaluateSession(session) {
   // Fold the confirmed, triangulated detection into the incident model so the dispatch
   // dashboard, Opius client, and notifications all react — same as the Android path.
   const observedAtMs = Date.now();
-  const incidentId = `incident-mesh-${session.sessionId.slice(0, 8)}`;
-  const incident = incidents.get(incidentId) || createIncident(incidentId, observedAtMs);
+  const existing = activeMeshIncident(observedAtMs);
+  const incidentId = existing ? existing.id : `incident-mesh-${session.sessionId.slice(0, 8)}`;
+  const incident = existing || createIncident(incidentId, observedAtMs);
   confirmedByNodes.forEach((n) => addUnique(incident.devices, n));
   confirmedByNodes.forEach((n) => addUnique(incident.confirmedByNodes, n));
   if (estimate) {
@@ -2149,66 +2216,95 @@ function meshEvaluateSession(session) {
   incident.lastObservedAtMs = observedAtMs;
   incident.updatedAt = nowIso();
   incident.recommendedAction = recommendationFor(incident);
-  incident.policeBrief = policeBriefFor(incident);
   incident.medicalBrief = medicalBriefFor(incident);
   incidents.set(incidentId, incident);
-  scheduleDispatchNotification(incident);
   session.incidentId = incidentId;
+  const shot = meshUpdateShot(session, incident);
+  scheduleDispatchNotification(incident);
 
   const trigger = {
     sessionId: session.sessionId,
     incidentId,
+    shotId: shot.shotId,
     confirmedByNodes,
     estimate,
+    zoneRanking: shot.zoneRanking,
+    timeline: incident.timeline,
     timestamp: nowIso()
   };
   meshBroadcast("response_trigger", trigger);
   console.log(
     `[mesh] RESPONSE TRIGGERED session=${session.sessionId} confirmed=${confirmed.length}/${threshold} ` +
       `method=${estimate ? estimate.method : "none"} spread=${estimate ? estimate.spreadMeters.toFixed(1) : "?"}m ` +
-      `floor=${estimate ? estimate.floorOffset : 0}`
+      `floor=${estimate ? estimate.floorOffset : 0} zone=${shot.zoneRanking?.topZone || "?"} ` +
+      `shots=${incident.timeline?.shotCount || 1}`
   );
   return trigger;
 }
 
 // After a session has triggered, later votes can still sharpen the location — most
 // importantly they can push it from a coarse centroid to a TDoA fix once ≥3 timed
-// confirmations exist. Re-broadcast a refined location when it materially improves.
+// confirmations exist, and every extra phone that names its room sharpens the room
+// ranking. Re-broadcast a refined location when it materially improves.
 function meshMaybeRefine(session) {
+  const incident = incidents.get(session.incidentId);
   const estimate = meshEstimateSource(session);
-  if (!estimate) return;
   const prev = session.lastEstimate;
-  const improved =
+  const improved = estimate && (
     !prev ||
     (estimate.method === "tdoa_multilateration" && prev.method !== "tdoa_multilateration") ||
-    estimate.contributingNodes > prev.contributingNodes;
-  if (!improved) return;
-
-  session.lastEstimate = estimate;
-  const incident = incidents.get(session.incidentId);
-  if (incident) {
-    incident.location = { latitude: estimate.latitude, longitude: estimate.longitude };
-    incident.updatedAt = nowIso();
-  }
-  meshBroadcast("location_refined", {
-    sessionId: session.sessionId,
-    incidentId: session.incidentId,
-    estimate,
-    timestamp: nowIso()
-  });
-  console.log(
-    `[mesh] location refined session=${session.sessionId} method=${estimate.method} ` +
-      `nodes=${estimate.contributingNodes} residual=${estimate.timingResidualMs}ms`
+    estimate.contributingNodes > prev.contributingNodes
   );
+
+  if (improved) {
+    session.lastEstimate = estimate;
+    if (incident) {
+      incident.location = { latitude: estimate.latitude, longitude: estimate.longitude };
+      incident.updatedAt = nowIso();
+    }
+    meshBroadcast("location_refined", {
+      sessionId: session.sessionId,
+      incidentId: session.incidentId,
+      estimate,
+      timestamp: nowIso()
+    });
+    console.log(
+      `[mesh] location refined session=${session.sessionId} method=${estimate.method} ` +
+        `nodes=${estimate.contributingNodes} residual=${estimate.timingResidualMs}ms`
+    );
+  }
+  // Room ranking can improve from votes that carry no position at all.
+  if (incident) meshUpdateShot(session, incident);
 }
 
 function meshRecordVote(session, vote) {
-  session.votes.set(vote.deviceId, vote);
+  session.votes.set(vote.deviceId, mergeVote(session.votes.get(vote.deviceId), vote));
   if (!session.triggered) {
     return meshEvaluateSession(session);
   }
   meshMaybeRefine(session);
   return null;
+}
+
+// Normalise a vote or detection body. A missing timestamp stays missing: substituting
+// "now" would be a guess, and a guessed arrival time corrupts the triangulation.
+function meshVoteFromBody(body, deviceId, isGunshot, defaultConfidence) {
+  const zone = String(body.zone || "").trim().slice(0, 64);
+  return {
+    deviceId,
+    isGunshot,
+    confidence: numberOrNull(body.confidence) ?? defaultConfidence,
+    latitude: numberOrNull(body.latitude) ?? NaN,
+    longitude: numberOrNull(body.longitude) ?? NaN,
+    altitude: numberOrNull(body.altitude) ?? NaN,
+    detectedAtMs: numberOrNull(body.detectedAtMs) ?? NaN,
+    timingUncertaintyMs: numberOrNull(body.timingUncertaintyMs) ?? NaN,
+    zone: zone || undefined,
+    peakDbfs: numberOrNull(body.peakDbfs) ?? NaN,
+    clipFraction: numberOrNull(body.clipFraction) ?? NaN,
+    clipRunMs: numberOrNull(body.clipRunMs) ?? NaN,
+    brightness: numberOrNull(body.brightness) ?? NaN
+  };
 }
 
 function handleMeshStream(req, res, params) {
@@ -2262,16 +2358,7 @@ async function handleMeshDetection(req, res) {
   setTimeout(() => detectionSessions.delete(sessionId), MESH_VOTE_WINDOW_MS * 3);
 
   // The raising device's own detection counts as its vote.
-  meshRecordVote(session, {
-    deviceId,
-    isGunshot: true,
-    confidence: numberOrNull(body.confidence) ?? 1,
-    latitude: numberOrNull(body.latitude) ?? NaN,
-    longitude: numberOrNull(body.longitude) ?? NaN,
-    altitude: numberOrNull(body.altitude) ?? NaN,
-    detectedAtMs: numberOrNull(body.detectedAtMs) ?? Date.now(),
-    timingUncertaintyMs: numberOrNull(body.timingUncertaintyMs) ?? NaN
-  });
+  meshRecordVote(session, meshVoteFromBody(body, deviceId, true, 1));
 
   // Ask every other device to classify its own audio and vote.
   meshBroadcast("wake_classify", {
@@ -2323,16 +2410,7 @@ async function handleMeshVote(req, res) {
     json(res, 409, { ok: false, error: "Vote window closed" }); return;
   }
 
-  const trigger = meshRecordVote(session, {
-    deviceId,
-    isGunshot: Boolean(body.isGunshot),
-    confidence: numberOrNull(body.confidence) ?? 0,
-    latitude: numberOrNull(body.latitude) ?? NaN,
-    longitude: numberOrNull(body.longitude) ?? NaN,
-    altitude: numberOrNull(body.altitude) ?? NaN,
-    detectedAtMs: numberOrNull(body.detectedAtMs) ?? Date.now(),
-    timingUncertaintyMs: numberOrNull(body.timingUncertaintyMs) ?? NaN
-  });
+  const trigger = meshRecordVote(session, meshVoteFromBody(body, deviceId, Boolean(body.isGunshot), 0));
 
   const confirmed = [...session.votes.values()].filter((v) => v.isGunshot).length;
   json(res, 202, { ok: true, sessionId, confirmed, required: meshRequiredConfirmations(), triggered: Boolean(trigger) });
@@ -2467,6 +2545,8 @@ function opiusAppHtml() {
         <div style="font-size:13.5px;color:var(--text-3);line-height:1.5;max-width:260px;" id="idleBlurb">Opius will alert you the moment something needs your attention. Turn on listening mode to also let this phone help detect and locate an incident.</div>
         <button class="btn-pill" id="sensorToggle" style="padding:11px 20px;font-size:13.5px;">Turn on listening mode</button>
         <div id="sensorReadout" style="font-size:11.5px;color:var(--text-3);line-height:1.6;max-width:270px;"></div>
+        <label for="myRoom" style="font-size:11.5px;color:var(--text-3);">Your room (helps locate a shot)</label>
+        <input class="f" id="myRoom" placeholder="e.g. Fowler 204" autocomplete="off" style="max-width:220px;text-align:center;"/>
       </div>
       <div id="homeIncident" style="display:none;">
         <div class="row" style="padding:14px 20px 10px;">
@@ -2474,6 +2554,7 @@ function opiusAppHtml() {
           <button class="btn-pill" id="pullBtn">Refresh</button>
         </div>
         <div id="summary"></div>
+        <div id="shotTimeline"></div>
         <div id="firstAid"></div>
         <div id="updates"></div>
         <div style="height:16px;"></div>
@@ -2608,6 +2689,8 @@ function opiusAppHtml() {
       ? '<div class="summary"><div class="k">SAFETY SUMMARY</div><div class="v">' + esc(summaryText) + '</div></div>'
       : "";
 
+    renderTimeline(incident.timelineSummary, incident.timeline);
+
     var fa = incident.firstAid;
     $("firstAid").innerHTML = fa
       ? '<div class="firstaid"><div class="k">FIRST AID</div><div class="head">' + esc(fa.headline) + '</div><ol>' +
@@ -2620,6 +2703,17 @@ function opiusAppHtml() {
           return '<div class="update' + (isCritical(t) ? " critical" : "") + '"><div class="meta"><div class="src">Opius Network</div></div><div class="txt">' + esc(t) + '</div></div>';
         }).join("")
       : '<div class="empty">No updates yet. You\\'ll see alerts here if something happens nearby.</div>';
+  }
+
+  // Detected-shot summary: what responders and the people sheltering most need.
+  function renderTimeline(summary, timeline) {
+    var el = $("shotTimeline");
+    if (!el) return;
+    if (!summary || !timeline) { el.innerHTML = ""; return; }
+    var hot = timeline.status === "active_fire";
+    el.innerHTML = '<div class="summary" style="border-left:4px solid ' + (hot ? "var(--danger)" : "var(--warning)") + '">' +
+      '<div class="k">' + (hot ? "SHOTS DETECTED — ACTIVE" : "SHOTS DETECTED — NONE IN LAST MINUTE") + '</div>' +
+      '<div class="v">' + esc(summary) + '</div></div>';
   }
 
   function renderChat() {
@@ -2670,6 +2764,7 @@ function opiusAppHtml() {
   });
   $("statusSubmit").addEventListener("click", function () {
     var building = $("fBuilding").value, floor = $("fFloor").value.trim(), room = $("fRoom").value.trim();
+    if (room) Sensor.setRoom(building + " " + room);
     var summary = building + (floor ? ", Floor " + floor : "") + (room ? ", Room " + room : "") + " · " + form.people + " with you" +
       (form.injured > 0 ? " · " + form.injured + " injured" : "") + (form.critical > 0 ? " · " + form.critical + " critical" : "");
     var safetyStatus = form.injured > 0 || form.critical > 0 ? "INJURED" : "SAFE";
@@ -2742,8 +2837,33 @@ function opiusAppHtml() {
     var clockUncertaintyMs = NaN;
     var position = null;         // { latitude, longitude, altitude }
     var onTrigger = function () {};
+    var onTimeline = function () {};
+    var room = "";
 
     function readout(html) { $("sensorReadout").innerHTML = html; }
+
+    // The room this phone is in. Until access points are mapped to rooms, the user
+    // names it; votes carry it so the relay can rank rooms against each other.
+    function loadRoom() {
+      try { room = localStorage.getItem("opius-room") || ""; } catch (e) { room = ""; }
+      var input = $("myRoom");
+      if (input) input.value = room;
+    }
+    function setRoom(value) {
+      room = String(value || "").trim().slice(0, 64);
+      try { localStorage.setItem("opius-room", room); } catch (e) { /* private mode */ }
+      var input = $("myRoom");
+      if (input && input.value !== room) input.value = room;
+    }
+    function acoustics(impulse, body) {
+      if (room) body.zone = room;
+      if (!impulse) return body;
+      body.peakDbfs = impulse.peakDbfs;
+      body.clipFraction = impulse.clipFraction;
+      body.clipRunMs = impulse.clipRunMs;
+      body.brightness = impulse.brightness;
+      return body;
+    }
 
     // api() rejects on any non-2xx, and some failures here are entirely normal —
     // voting on a session that has already closed returns 404, and losing the stream
@@ -2855,6 +2975,11 @@ function opiusAppHtml() {
       stream.addEventListener("location_refined", function (event) {
         onTrigger(JSON.parse(event.data), "refined");
       });
+
+      // Each confirmed shot updates the incident's timeline and room ranking.
+      stream.addEventListener("shot_timeline", function (event) {
+        onTimeline(JSON.parse(event.data));
+      });
     }
 
     function platformLabel() {
@@ -2896,7 +3021,7 @@ function opiusAppHtml() {
         body.detectedAtMs = impulse.atServerMs;
         body.timingUncertaintyMs = impulse.timingUncertaintyMs;
       }
-      busPost("/v1/mesh/votes", body);
+      busPost("/v1/mesh/votes", acoustics(impulse, body));
     }
 
     function raiseDetection(impulse) {
@@ -2915,7 +3040,7 @@ function opiusAppHtml() {
         body.longitude = position.longitude;
         if (position.altitude !== null) body.altitude = position.altitude;
       }
-      busPost("/v1/mesh/detections", body);
+      busPost("/v1/mesh/detections", acoustics(impulse, body));
       render("Impulse detected — asking nearby devices to confirm.");
     }
 
@@ -2923,12 +3048,16 @@ function opiusAppHtml() {
       var samples = event.inputBuffer.getChannelData(0);
       var count = samples.length;
       var sumSquares = 0, peak = 0, peakIndex = 0, clipped = 0;
+      var diffSquares = 0, run = 0, longestRun = 0, prev = 0;
       for (var i = 0; i < count; i++) {
         var value = samples[i];
         sumSquares += value * value;
+        var d = value - prev;
+        diffSquares += d * d;
+        prev = value;
         var magnitude = value < 0 ? -value : value;
         if (magnitude > peak) { peak = magnitude; peakIndex = i; }
-        if (magnitude >= 0.98) clipped++;
+        if (magnitude >= 0.98) { clipped++; run++; if (run > longestRun) longestRun = run; } else { run = 0; }
       }
       var rms = Math.sqrt(sumSquares / count);
       var crest = rms > 0 ? peak / rms : 0;
@@ -2963,6 +3092,13 @@ function opiusAppHtml() {
         peak: peak,
         crest: crest,
         clipFraction: clipFraction,
+        // Room-ranking features: level, how long the mic stayed railed (a proximity
+        // cue), and high-frequency share — walls strip highs, so the source room's
+        // phones hear a brighter sound. Brightness is first-difference energy over
+        // signal energy, a cheap stand-in for spectral centroid.
+        peakDbfs: 20 * Math.log10(Math.max(peak, 1e-5)),
+        clipRunMs: (longestRun / sampleRate) * 1000,
+        brightness: sumSquares > 0 ? diffSquares / sumSquares : 0,
         timingUncertaintyMs: timingUncertaintyMs()
       };
       raiseDetection(lastImpulse);
@@ -3060,9 +3196,13 @@ function opiusAppHtml() {
       authHeaders: function () {
         return busToken ? { authorization: "Bus " + busToken } : {};
       },
-      init: function (triggerHandler) {
+      setRoom: setRoom,
+      init: function (triggerHandler, timelineHandler) {
         onTrigger = triggerHandler || function () {};
+        onTimeline = timelineHandler || function () {};
         deviceId = deviceIdentity();
+        loadRoom();
+        $("myRoom").addEventListener("change", function () { setRoom($("myRoom").value); });
         // Receive confirmed alerts even when not listening: everyone in the building
         // needs the response, whether or not their microphone is helping detect it.
         syncClock().then(function () { connectStream(false); });
@@ -3093,6 +3233,8 @@ function opiusAppHtml() {
     }
     banner(detail);
     refresh();
+  }, function (update) {
+    renderTimeline(update.summary, update.timeline);
   });
   setStatusPill(false);
   renderChat();
