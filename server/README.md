@@ -35,6 +35,10 @@ When `ECHOSHIELD_RELAY_API_KEY` is configured:
 - `/dashboard` and `/dispatch` require responder authentication via `/login` or `?key=`.
 - Session credentials are exchanged for an `HttpOnly` cookie; the relay key is never leaked into client HTML.
 - Unauthenticated requests are rejected with a login challenge.
+- Public incident reads omit structured field reports and rebuild briefs/live updates without those reports. Responder credentials retain access.
+- Public bus-token chat messages always use the `user` role and `App User` sender.
+- `POST /v1/incidents/:id/notes` accepts at most 500 characters of note text and 100 of room text, valid safety states, and integer counts from 0–1000. Writes are limited to one per five seconds per authenticated bus device (responder writes share a per-IP limit); only the latest 250 notes are retained on this path.
+- These in-memory limits apply to this relay process; they are not a distributed abuse-prevention system.
 
 ## Test
 

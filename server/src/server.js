@@ -1492,7 +1492,27 @@ async function sendSendGridEmail(incident, message) {
   };
 }
 
-function publicIncident(incident) {
+function withoutFieldReports(incident) {
+  const reportDeviceIds = new Set(incident.notes.map((note) => note.deviceId).filter(Boolean));
+  const locationFromReport = incident.notes.some((note) => incident.location &&
+    note.latitude === incident.location.latitude && note.longitude === incident.location.longitude &&
+    !(note.threatLatitude === note.latitude && note.threatLongitude === note.longitude));
+  const view = {
+    ...incident,
+    notes: [],
+    liveUpdates: [],
+    observations: incident.observations.filter((observation) => observation.alertType !== "INCIDENT:REPORT"),
+    devices: incident.devices.filter((deviceId) => !reportDeviceIds.has(deviceId)),
+    leaders: incident.leaders.filter((deviceId) => !reportDeviceIds.has(deviceId)),
+    location: locationFromReport ? null : incident.location
+  };
+  view.policeBrief = policeBriefFor(view);
+  view.medicalBrief = medicalBriefFor(view);
+  return view;
+}
+
+function publicIncident(incident, includeReports = false) {
+  if (!includeReports) incident = withoutFieldReports(incident);
   const storedLiveUpdates = sanitizeLiveUpdates(incident.liveUpdates || [], incident);
   const effectiveLiveUpdates = storedLiveUpdates.length
     ? storedLiveUpdates
@@ -1509,7 +1529,7 @@ function publicIncident(incident) {
     firstAid: firstAidGuidance(incident),
     liveUpdates: effectiveLiveUpdates,
     observations: incident.observations.slice(-25),
-    notes: incident.notes.slice(-25),
+    notes: includeReports ? incident.notes.slice(-25) : undefined,
     authorityMessages: incident.authorityMessages.slice(-50)
   };
 }
@@ -1616,6 +1636,18 @@ async function handleIncidentReport(req, res) {
   });
 }
 
+const noteWriteTimes = new Map();
+const NOTE_INTERVAL_MS = 5000;
+const MAX_INCIDENT_NOTES = 250;
+
+function userWriteIdentity(req) {
+  const token = (req.headers.authorization || "").slice(4);
+  for (const [deviceId, entry] of meshDevices) {
+    if (entry.busToken === token) return deviceId;
+  }
+  return null;
+}
+
 async function handleNote(req, res, incidentId) {
   if (!authenticateUserWrite(req)) {
     json(res, 401, { ok: false, error: "Unauthorized" });
@@ -1636,10 +1668,31 @@ async function handleNote(req, res, incidentId) {
     return;
   }
 
+  if (!note || typeof note !== "object" || Array.isArray(note) ||
+      [note.injuredCount, note.companionsCount].some((count) => count !== undefined && (!Number.isInteger(Number(count)) || Number(count) < 0 || Number(count) > 1000)) ||
+      (note.note !== undefined && (typeof note.note !== "string" || note.note.length > 500)) ||
+      (note.roomNumber !== undefined && (typeof note.roomNumber !== "string" || note.roomNumber.length > 100)) ||
+      (note.safetyStatus !== undefined && !["SAFE", "INJURED", "UNKNOWN"].includes(note.safetyStatus))) {
+    json(res, 422, { ok: false, error: "Invalid field report: note max 500 characters, room max 100 characters, status SAFE/INJURED/UNKNOWN." });
+    return;
+  }
+  const deviceId = authenticate(req) ? null : userWriteIdentity(req);
+  // Key by the authenticated device, never the caller-supplied deviceId.
+  const rateKey = deviceId || `responder:${req.socket.remoteAddress}`;
+  const now = Date.now();
+  for (const [key, timestamp] of noteWriteTimes) {
+    if (now - timestamp >= NOTE_INTERVAL_MS) noteWriteTimes.delete(key);
+  }
+  if (noteWriteTimes.has(rateKey)) {
+    json(res, 429, { ok: false, error: "Wait 5 seconds between field reports." });
+    return;
+  }
+  noteWriteTimes.set(rateKey, now);
+
   const stored = {
     id: crypto.randomUUID(),
     receivedAt: nowIso(),
-    deviceId: note.deviceId || null,
+    deviceId: deviceId || note.deviceId || null,
     safetyStatus: note.safetyStatus || "UNKNOWN",
     injuredCount: Number(note.injuredCount) || 0,
     companionsCount: Number(note.companionsCount) || 0,
@@ -1650,6 +1703,7 @@ async function handleNote(req, res, incidentId) {
   };
 
   incident.notes.push(stored);
+  if (incident.notes.length > MAX_INCIDENT_NOTES) incident.notes.splice(0, incident.notes.length - MAX_INCIDENT_NOTES);
   incident.updatedAt = nowIso();
   incident.medicalBrief = medicalBriefFor(incident);
   incident.policeBrief = policeBriefFor(incident);
@@ -1685,9 +1739,11 @@ async function handleAuthorityMessage(req, res, incidentId) {
     return;
   }
 
+  const responder = authenticate(req);
+  const role = responder ? (input.role || "authority") : "user";
   const message = addAuthorityMessage(incident, {
-    sender: input.sender || "Demo Dispatcher",
-    role: input.role || "authority",
+    sender: responder ? (input.sender || "Demo Dispatcher") : "App User",
+    role,
     message: input.message
   });
 
@@ -1697,8 +1753,8 @@ async function handleAuthorityMessage(req, res, incidentId) {
   }
 
   // Demo two-way chat: when app sends a user message, auto-generate a responder-style reply.
-  if ((input.role || "").toLowerCase() === "user") {
-    const reply = await generateAgentReply(incident, input.message);
+  if (String(role).toLowerCase() === "user") {
+    const reply = await generateAgentReply(responder ? incident : withoutFieldReports(incident), input.message);
     addAuthorityMessage(incident, {
         sender: "EchoShield Responder",
         role: "assistant",
@@ -1712,7 +1768,7 @@ async function handleAuthorityMessage(req, res, incidentId) {
     ok: true,
     incidentId: incident.id,
     message,
-    liveUpdates: incident.liveUpdates,
+    liveUpdates: publicIncident(incident, responder).liveUpdates,
     authorityMessages: incident.authorityMessages.slice(-50)
   });
 }
@@ -3532,13 +3588,13 @@ async function route(req, res) {
   }
 
   if (req.method === "GET" && pathname === "/v1/incidents") {
-    json(res, 200, { ok: true, incidents: [...incidents.values()].map(publicIncident) });
+    json(res, 200, { ok: true, incidents: [...incidents.values()].map((incident) => publicIncident(incident, authenticate(req))) });
     return;
   }
 
   if (req.method === "GET" && pathname === "/v1/incidents/latest") {
     const latest = latestActiveIncident() || [...incidents.values()].sort((a, b) => b.lastObservedAtMs - a.lastObservedAtMs)[0];
-    json(res, latest ? 200 : 404, latest ? { ok: true, incident: publicIncident(latest) } : { ok: false, error: "No incidents" });
+    json(res, latest ? 200 : 404, latest ? { ok: true, incident: publicIncident(latest, authenticate(req)) } : { ok: false, error: "No incidents" });
     return;
   }
 
@@ -3563,7 +3619,7 @@ async function route(req, res) {
   const incidentMatch = pathname.match(/^\/v1\/incidents\/([^/]+)$/);
   if (req.method === "GET" && incidentMatch) {
     const incident = incidents.get(decodeURIComponent(incidentMatch[1]));
-    json(res, incident ? 200 : 404, incident ? { ok: true, incident: publicIncident(incident) } : { ok: false, error: "Incident not found" });
+    json(res, incident ? 200 : 404, incident ? { ok: true, incident: publicIncident(incident, authenticate(req)) } : { ok: false, error: "Incident not found" });
     return;
   }
 

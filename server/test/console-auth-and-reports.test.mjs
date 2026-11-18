@@ -184,6 +184,30 @@ describe("Responder Console Security & Field Reports (Authenticated Mode)", () =
     assert.ok(dispatchHtml.includes("Injured:"), "Injured count should be visible");
     assert.ok(dispatchHtml.includes("Door barricaded with heavy desk"), "Note text should be visible");
 
+    // Public incident views must not expose reports or their derived summaries.
+    for (const route of ["/v1/incidents", "/v1/incidents/latest", `/v1/incidents/${encodeURIComponent(incidentId)}`]) {
+      const response = await fetch(base + route);
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      assert.ok(!body.includes('"notes"'), route);
+      assert.ok(!body.includes("Door barricaded with heavy desk"), route);
+      assert.ok(!body.includes("Room 304 (Math Wing)"), route);
+      assert.ok(!body.includes("Reports mention 2 injured"), route);
+    }
+    const privateView = await fetch(`${base}/v1/incidents/${encodeURIComponent(incidentId)}`, { headers: { cookie: cookieHeader } });
+    assert.equal((await privateView.json()).incident.notes.length, 1);
+
+    const oversized = await fetch(`${base}/v1/incidents/${encodeURIComponent(incidentId)}/notes`, {
+      method: "POST", headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ note: "x".repeat(501) })
+    });
+    assert.equal(oversized.status, 422);
+    const repeated = await fetch(`${base}/v1/incidents/${encodeURIComponent(incidentId)}/notes`, {
+      method: "POST", headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ note: "Repeated" })
+    });
+    assert.equal(repeated.status, 429);
+
     // 4. Send authority message using cookie (simulating dispatch UI form submit without bearer header)
     const msgRes = await fetch(`${base}/v1/incidents/${encodeURIComponent(incidentId)}/authority-messages`, {
       method: "POST",
@@ -208,6 +232,65 @@ describe("Responder Console Security & Field Reports (Authenticated Mode)", () =
     });
     assert.equal(clearRes.status, 200);
   });
+  test("public bus tokens cannot impersonate responders or bypass note limits with a deviceId", async () => {
+    const controller = new AbortController();
+    try {
+      const stream = await fetch(`${base}/v1/mesh/stream?deviceId=security-client&sensor=0`, { signal: controller.signal });
+      const reader = stream.body.getReader();
+      let buffer = "";
+      let token;
+      while (!token) {
+        const { value, done } = await reader.read();
+        assert.ok(!done);
+        buffer += new TextDecoder().decode(value);
+        const hello = /event: hello\ndata: ([^\n]+)/.exec(buffer);
+        if (hello) token = JSON.parse(hello[1]).busToken;
+      }
+      const latest = await (await fetch(`${base}/v1/incidents/latest`)).json();
+      const id = latest.incident.id;
+      const headers = { "content-type": "application/json", authorization: `Bus ${token}` };
+      for (const role of [undefined, "authority", "medical", "system"]) {
+        const response = await fetch(`${base}/v1/incidents/${id}/authority-messages`, {
+          method: "POST", headers,
+          body: JSON.stringify({ sender: "Police Dispatcher", role, message: "Keep sheltering" })
+        });
+        assert.equal(response.status, 202);
+        const body = await response.json();
+        assert.equal(body.message.role, "user");
+        assert.equal(body.message.sender, "App User");
+        assert.ok(!JSON.stringify(body.liveUpdates).includes("Door barricaded with heavy desk"));
+      }
+      for (const [index, deviceId] of ["forged-one", "forged-two"].entries()) {
+        const response = await fetch(`${base}/v1/incidents/${id}/notes`, {
+          method: "POST", headers, body: JSON.stringify({ deviceId, note: "Private status" })
+        });
+        assert.equal(response.status, index === 0 ? 202 : 429);
+      }
+      const detail = await (await fetch(`${base}/v1/incidents/${id}`, { headers: { authorization: `Bearer ${API_KEY}` } })).json();
+      assert.equal(detail.incident.notes.at(-1).deviceId, "security-client");
+    } finally {
+      controller.abort();
+    }
+  });
+
+  test("Android incident-report observations and fallback user locations stay private", async () => {
+    const response = await fetch(`${base}/v1/incidents/reports`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({ messageId: "private-report", deviceId: "private-device-unique", note: "Private Android report text", roomNumber: "Secret Room 917", latitude: 12.34567, longitude: 23.45678 })
+    });
+    assert.equal(response.status, 202);
+    const { incidentId } = await response.json();
+    for (const route of ["/v1/incidents", "/v1/incidents/latest", `/v1/incidents/${incidentId}`]) {
+      const body = await (await fetch(base + route)).text();
+      for (const secret of ["Private Android report text", "Secret Room 917", "private-device-unique", "12.34567", "23.45678"]) {
+        assert.ok(!body.includes(secret), `${route} leaked ${secret}`);
+      }
+    }
+    const privateView = await (await fetch(`${base}/v1/incidents/${incidentId}`, { headers: { authorization: `Bearer ${API_KEY}` } })).json();
+    assert.equal(privateView.incident.notes.at(-1).note, "Private Android report text");
+  });
+
 });
 
 describe("Responder Console in Open Demo Mode (No API_KEY set)", () => {
