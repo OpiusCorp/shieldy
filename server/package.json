@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "start": "node --env-file=.env src/server.js",
-    "check": "node --check src/server.js"
+    "check": "node --check src/server.js",
+    "test": "node --test test/*.test.mjs",
+    "simulate": "node test/simulate.mjs"
   },
   "engines": {
     "node": ">=20"

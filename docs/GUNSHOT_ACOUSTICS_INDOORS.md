@@ -112,22 +112,39 @@ missing or fails those guards, we fall back to the centre of the confirming clus
 weighted by each phone's classifier confidence, reported with a `spreadMeters` radius.
 This says "somewhere in here", which is the honest answer for unsynchronised phones.
 
-**Accuracy in practice.** The limiting term is clock-offset uncertainty, not the
-solver. Measured against the relay implementation, with five simulated phones spread
-across a 60 x 60 m floor plate and Gaussian clock error applied to each arrival time:
+**Refusing fixes outside the listeners.** A cluster of phones hearing a distant shot
+sees an almost flat wavefront: direction is constrained, range is not, and the grid
+search slides to the edge of its window while the residual stays tiny. The solve
+therefore also rejects any fix further than 1.5 × the listeners' radius (or radius +
+15 m) from their centre (`MAX_FIX_RADIUS_FACTOR`). Without this guard, 10% of fixes at
+±20 ms clock error were more than 120 m off.
 
-| Clock jitter | TDoA fixes | Median error |
-| --- | --- | --- |
-| ±0 ms | 6/6 | 0.0 m |
-| ±5 ms | 6/6 | 1.6 m |
-| ±20 ms | 6/6 | 7.0 m |
-| ±50 ms | 0/6 | — (all fell back to centroid) |
+**Accuracy in practice.** The limiting term is clock-offset uncertainty, not the
+solver. From `npm run simulate` in `server/` (200 trials per row): five phones placed at
+random across a 60 × 60 m floor plate, the source anywhere in the central 40 × 40 m,
+Gaussian clock error σ on each arrival, and each phone honestly reporting σ as its
+timing uncertainty.
+
+| Clock error (σ) | Fix returned | Median error | 90th percentile |
+| --- | --- | --- | --- |
+| ±0 ms | 99% | 0.2 m | 0.5 m |
+| ±5 ms | 95% | 2.0 m | 7.1 m |
+| ±20 ms | 86% | 7.8 m | 16.6 m |
+| ±50 ms | 65% | 15.2 m | 32.5 m |
+
+These rows assume **exact phone positions**, which phones do not have indoors. Adding
+5 m of position error per phone (good outdoor GPS) gives a median of 5–14 m across the
+same clock range, and the solver returns a fix in only 60–80% of trials, because
+the residual check does not yet account for position error. Indoors, with WiFi-level
+positions off by 5–15 m, the arrival-time fix is not reliable — use the room ranking
+below.
 
 Two things to take from this. First, the error tracks the clock directly — roughly
-0.343 m per millisecond of offset error, as the physics demands. Second, the guards do
-their job: at ±50 ms the solver **refuses** rather than emitting a confident-looking
-fix it cannot support. So treat a TDoA result as a *room-or-corridor* answer, not the
-sub-metre figure a fixed, wired sensor array achieves — and the UI labels it as such.
+0.343 m per millisecond of offset error, as the physics demands. Second, at ±50 ms the
+solver still returns fixes about 15 m off, since 50 ms is inside the 60 ms timing
+cutoff; it refuses only once a phone reports more than 60 ms. So treat a TDoA result
+as a *room-or-corridor* answer at best, not the sub-metre figure a fixed, wired sensor
+array achieves — and the UI labels it as such.
 
 **Within-building / floor metrics.** Each confirming vote carries its **altitude**, and
 the fix converts the altitude spread across confirming phones into a relative **floor
@@ -142,6 +159,82 @@ cannot give a responder at all.
    leader-broadcast epoch) to pull the ranging error under a few metres.
 3. Weight each node's contribution by its own timing quality rather than gating the
    whole solve on the worst clock in the set.
+4. Include each phone's position accuracy in the residual tolerance, so honest
+   position error does not make the solver refuse.
+
+## 4a. Room ranking: the indoor answer
+
+Indoors, the arrival-time fix fails for two reasons a better solver cannot remove:
+phone positions are only known to the nearest access point (5–15 m), and every phone in
+one room shares that same error, so averaging them does not cancel it. Sound also
+reaches other rooms through doors and corridors, not in straight lines.
+
+What survives is a comparison between **groups** of phones (`rankZones()` in
+`server/src/meshAnalysis.js`). Each vote carries the room its phone is in (`zone`) and
+four features of what it heard:
+
+| Feature | Why it separates rooms | Weight |
+| --- | --- | --- |
+| Peak level (`peakDbfs`) | A wall costs 20–40 dB with doors closed | 0.30 |
+| Clipping (`clipFraction`, `clipRunMs`) | Only phones in or next to the source room rail the mic | 0.30 |
+| Earliest arrival | The source room hears it first | 0.25 |
+| Brightness (`brightness`) | Walls strip high frequencies | 0.15 |
+
+Each feature is the **median over the room's phones**, so one phone in a bag cannot
+swing the result. Phones that heard nothing count as silence, not as missing data — a
+room of phones that heard nothing is evidence the shot was elsewhere. An arrival lead
+smaller than twice the worst clock uncertainty is not treated as a lead. Confidence is
+`high` when the top room beats the next by ≥ 0.25 and at least three of its phones
+heard the shot.
+
+From `npm run simulate` (500 trials per row; 6 rooms on a corridor; 30 people per
+room; 40% of phones in a pocket or bag, losing 10–25 dB):
+
+| Listening phones per room | Share of room | Correct, doors closed | Correct, doors open | Rated high (open) | Correct when high |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 3% | 99% | 93% | 0% | — |
+| 2 | 7% | 100% | 98% | 0% | — |
+| 3 | 10% | 100% | 99% | 90% | 100% |
+| 5 | 17% | 100% | 100% | 92% | 100% |
+| 10 | 33% | 100% | 100% | 99% | 100% |
+
+The model is idealised — it has no reverberation, no sound leaking along the corridor
+louder than through the wall, and no large open spaces — so treat these as an upper
+bound until checked with recordings in a real building. What it does show is that room
+ranking degrades gracefully: even with only one or two listening phones per room it
+usually names the right room, and it withholds `high` confidence until it has enough
+phones to justify it.
+
+**Where `zone` comes from.** Today the user names their room in the web client (it is
+remembered, and also set from the status form). The intended source is the WiFi access
+point each phone is connected to, mapped to rooms in a one-time walk through each
+building; that mapping does not exist yet.
+
+## 4b. Shot timeline: what responders asked for
+
+Every confirmed detection becomes a **shot** on the incident (`buildShotTimeline()`).
+Detections within 1.5 s of each other and close together are merged into one shot,
+since one shot is heard by many phones and several may raise their own session; two
+detections too far apart for one gun stay separate. All shots within 15 minutes join
+one incident.
+
+From the shot list the relay derives, and shows in the dispatch console, the web
+client, the police brief and the assistant's context:
+
+- **Time of first shot, shot count, pace**, and whether fire is ongoing (`active_fire`)
+  or there has been no shot for a minute (`lull`).
+- **Latest location**: top-ranked room with its confidence, and coordinates if a fix
+  exists.
+- **Direction of movement** between located shots, reported only when the move is
+  larger than the two positions' combined uncertainty; otherwise "no significant
+  movement". Indoors, the **room sequence** ("Rm 204 → Hall B → Rm 210") carries the
+  same information.
+- **Minimum number of shooters**: each shot is assigned to a track one person could
+  have reached in time at a 7 m/s sprint; a shot no track can reach requires another
+  shooter. This is reported as "at least N".
+
+Acoustic detection is blind between shots; the timeline says how long ago the last
+shot was rather than implying a current position.
 
 ## 5. Preventing the herding effect with many phones
 

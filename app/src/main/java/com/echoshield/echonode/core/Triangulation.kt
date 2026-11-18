@@ -5,6 +5,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -62,6 +63,13 @@ object Triangulation {
 
     /** Nodes closer together than this give the solve no geometric leverage. */
     private const val MIN_BASELINE_METERS = 4.0
+
+    /**
+     * Fixes further than this multiple of the listeners' radius from their centre are
+     * rejected: they are the solve sliding along a poorly constrained direction to the
+     * edge of the grid, not a real source. Mirrors MAX_FIX_RADIUS_FACTOR in the relay.
+     */
+    private const val MAX_FIX_RADIUS_FACTOR = 1.5
 
     private const val COARSE_RANGE_METERS = 150.0
     private const val COARSE_STEP_METERS = 5.0
@@ -205,6 +213,11 @@ object Triangulation {
         // a residual far beyond that means the arrival times are not one shot.
         val tolerance = (timed.maxOf { it.timingUncertaintyMs } * 2.0).coerceAtLeast(10.0)
         if (residualMs > tolerance) return null
+
+        // Phones that all heard one shot surround it or sit near it; a fix far outside
+        // their footprint fits about as well as any point on that line, so it is noise.
+        val radius = points.maxOf { hypot(it.first, it.second) }
+        if (hypot(best.first, best.second) > max(radius * MAX_FIX_RADIUS_FACTOR, radius + 15.0)) return null
 
         return Point(
             latitude = lat0 + best.second / metresPerDegLat,

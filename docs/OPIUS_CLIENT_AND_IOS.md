@@ -42,6 +42,8 @@ rather than a spectator:
 | Raise | `POST /v1/mesh/detections` (rate-limited to one per 6 s) |
 | Vote | on `wake_classify`, reports whether *this* phone heard an impulse in the last 3 s, with position, altitude and arrival time |
 | Respond | `response_trigger` / `location_refined` surface immediately instead of waiting for the 5 s poll |
+| Locate the room | votes and detections carry the user's room (`zone`) plus `peakDbfs`, `clipFraction`, `clipRunMs` and `brightness`, which the relay uses to rank rooms (see `GUNSHOT_ACOUSTICS_INDOORS.md` §4a) |
+| Timeline | `shot_timeline` events update a "Shots detected" card: count, latest room, room sequence, direction, minimum shooters |
 
 **Honest limits — stated in the UI as well as here.**
 
