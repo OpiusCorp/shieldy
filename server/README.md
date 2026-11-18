@@ -25,10 +25,24 @@ Open:
 - `http://localhost:8787/dispatch`
 - `http://localhost:8787/v1/incidents`
 
-Optional bearer token:
+Optional bearer token & console security:
 
 ```bash
 ECHOSHIELD_RELAY_API_KEY=devsecret npm start
+```
+
+When `ECHOSHIELD_RELAY_API_KEY` is configured:
+- `/dashboard` and `/dispatch` require responder authentication via `/login` or `?key=`.
+- Session credentials are exchanged for an `HttpOnly` cookie; the relay key is never leaked into client HTML.
+- Unauthenticated requests are rejected with a login challenge.
+
+## Test
+
+Run automated test suite:
+
+```bash
+cd server
+npm test
 ```
 
 ## Automated Dispatch Notification

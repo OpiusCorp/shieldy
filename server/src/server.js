@@ -66,10 +66,40 @@ function text(res, status, body, contentType = "text/plain; charset=utf-8") {
 function authenticate(req) {
   if (!API_KEY) return true;
   const authorization = req.headers.authorization || "";
-  return authorization === `Bearer ${API_KEY}`;
+  if (authorization === `Bearer ${API_KEY}`) return true;
+  const cookies = parseCookies(req.headers.cookie);
+  if (cookies.echoshield_auth === API_KEY) return true;
+  return false;
 }
 
-function readJson(req) {
+function parseCookies(header = "") {
+  const list = {};
+  if (!header) return list;
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx > -1) {
+      const key = part.slice(0, idx).trim();
+      const val = part.slice(idx + 1).trim();
+      try {
+        list[key] = decodeURIComponent(val);
+      } catch (_) {
+        list[key] = val;
+      }
+    }
+  }
+  return list;
+}
+
+function parseFormData(raw = "") {
+  const params = new URLSearchParams(raw);
+  const data = {};
+  for (const [k, v] of params.entries()) {
+    data[k] = v;
+  }
+  return data;
+}
+
+function readRawBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -85,21 +115,17 @@ function readJson(req) {
     });
 
     req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf8");
-      if (!raw.trim()) {
-        resolve({});
-        return;
-      }
-
-      try {
-        resolve(JSON.parse(raw));
-      } catch (error) {
-        reject(error);
-      }
+      resolve(Buffer.concat(chunks).toString("utf8"));
     });
 
     req.on("error", reject);
   });
+}
+
+async function readJson(req) {
+  const raw = await readRawBody(req);
+  if (!raw.trim()) return {};
+  return JSON.parse(raw);
 }
 
 function parsePayload(payload = "") {
@@ -1711,6 +1737,54 @@ async function handleIncidentClearNotifications(req, res, incidentId) {
   });
 }
 
+function safeConsoleRedirect(value) {
+  if (typeof value !== "string" || /[\\\r\n]/.test(value)) return "/dispatch";
+  try {
+    const url = new URL(value, "http://localhost");
+    if (!value.startsWith("/") || value.startsWith("//") || url.origin !== "http://localhost") return "/dispatch";
+    if (!["/", "/dashboard", "/dispatch"].includes(url.pathname)) return "/dispatch";
+    return url.pathname + url.search;
+  } catch {
+    return "/dispatch";
+  }
+}
+
+function loginHtml(redirectPath = "/dispatch", errorMessage = "") {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EchoShield Responder Login</title>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #eef1f5; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .card { background: white; padding: 32px; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); width: 340px; border: 1px solid #dfe4ec; }
+    h1 { font-size: 20px; font-weight: 800; margin: 0 0 8px; color: #121820; }
+    p { color: #5c6777; font-size: 13px; margin: 0 0 20px; line-height: 1.4; }
+    label { display: block; font-size: 12px; font-weight: 700; color: #455469; margin-bottom: 6px; }
+    input[type="password"] { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #ccd3de; border-radius: 8px; font-size: 14px; margin-bottom: 16px; outline: none; }
+    input[type="password"]:focus { border-color: #1b73e8; }
+    button { width: 100%; padding: 11px; background: #1b73e8; color: white; border: none; border-radius: 8px; font-weight: 700; font-size: 14px; cursor: pointer; }
+    button:hover { background: #1557b0; }
+    .error { background: #fde2e1; color: #b42318; padding: 8px 12px; border-radius: 6px; font-size: 12.5px; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>EchoShield Console</h1>
+    <p>This responder console requires authentication. Please enter the relay API key.</p>
+    ${errorMessage ? `<div class="error">${escapeHtml(errorMessage)}</div>` : ""}
+    <form method="POST" action="/login">
+      <input type="hidden" name="redirect" value="${escapeHtml(redirectPath)}">
+      <label for="key">Relay API Key</label>
+      <input id="key" type="password" name="key" placeholder="Enter relay key…" required autofocus>
+      <button type="submit">Unlock Console</button>
+    </form>
+  </div>
+</body>
+</html>`;
+}
+
 function dashboardHtml() {
   const rows = [...incidents.values()]
     .sort((a, b) => b.lastObservedAtMs - a.lastObservedAtMs)
@@ -1721,7 +1795,7 @@ function dashboardHtml() {
         <p><strong>Police:</strong> ${escapeHtml(incident.policeBrief)}</p>
         <p><strong>Medical:</strong> ${escapeHtml(incident.medicalBrief)}</p>
         <p><strong>Devices:</strong> ${incident.devices.length} | <strong>Observations:</strong> ${incident.observations.length}</p>
-        <button onclick="fetch('/v1/incidents/${encodeURIComponent(incident.id)}/clear-notifications', {method: 'POST', headers: {'authorization': 'Bearer ${API_KEY}'}}).then(() => window.location.reload())">Clear Notifications</button>
+        <button onclick="fetch('/v1/incidents/${encodeURIComponent(incident.id)}/clear-notifications', {method: 'POST'}).then(() => window.location.reload())">Clear Notifications</button>
       </article>
     `).join("\n");
 
@@ -1738,11 +1812,16 @@ function dashboardHtml() {
     article { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 16px 0; }
     code { font-size: 0.8em; color: #555; }
     button { border: 0; border-radius: 8px; background: #b42318; color: white; padding: 9px 12px; font-weight: 700; cursor: pointer; margin-top: 8px; }
+    .header-bar { display: flex; justify-content: space-between; align-items: center; }
+    .header-bar a { color: #555; font-size: 13px; text-decoration: none; }
   </style>
 </head>
 <body>
   <main>
-    <h1>EchoShield Relay Console</h1>
+    <div class="header-bar">
+      <h1>EchoShield Relay Console</h1>
+      ${API_KEY ? '<a href="/logout">Log out</a>' : ''}
+    </div>
     <p>${incidents.size} incident(s) tracked. Refreshes every 5 seconds. <a href="/dispatch">Open dispatch chat</a></p>
     ${rows || "<p>No incidents yet.</p>"}
   </main>
@@ -1784,6 +1863,29 @@ function dispatchHtml(selectedIncidentId = null) {
        <p class="disclaimer">${escapeHtml(firstAid.disclaimer)}</p>`
     : "";
 
+  const notesRows = (selected?.notes || [])
+    .slice()
+    .reverse()
+    .map((note) => {
+      const room = note.roomNumber || note.locationLabel || "Unspecified location";
+      const statusClass = note.safetyStatus === "INJURED" ? "badge-injured" : note.safetyStatus === "SAFE" ? "badge-safe" : "badge-unknown";
+      const timeStr = note.receivedAt ? new Date(note.receivedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+      return `
+        <div class="note-card">
+          <div class="meta">
+            <strong>${escapeHtml(room)}</strong>
+            <span class="${statusClass}">${escapeHtml(note.safetyStatus || "UNKNOWN")}</span>
+          </div>
+          <div class="counts">
+            <span><strong>People:</strong> ${escapeHtml(String(note.companionsCount ?? 1))}</span> ·
+            <span><strong>Injured:</strong> ${escapeHtml(String(note.injuredCount ?? 0))}</span>
+            ${timeStr ? ` · <span>${escapeHtml(timeStr)}</span>` : ""}
+          </div>
+          ${note.note ? `<p class="note-text">${escapeHtml(note.note)}</p>` : ""}
+        </div>
+      `;
+    })
+    .join("");
   const METHOD_LABELS = { tdoa_multilateration: "Arrival-time fix", weighted_centroid: "Cluster centre", single_report: "Single phone" };
   const timeline = selected?.shots?.length ? buildShotTimeline(selected.shots) : null;
   const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -1833,7 +1935,7 @@ function dispatchHtml(selectedIncidentId = null) {
     :root { color-scheme: light; }
     body { margin: 0; font-family: system-ui, sans-serif; background: #eef1f5; color: #121820; }
     header { background: #121820; color: white; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
-    header a { color: #9ad0ff; }
+    header a { color: #9ad0ff; text-decoration: none; }
     main { display: grid; grid-template-columns: 280px minmax(0, 1fr) 360px; min-height: calc(100vh - 64px); }
     nav { border-right: 1px solid #d5dae3; background: white; padding: 16px; }
     nav a { display: block; color: #121820; text-decoration: none; padding: 12px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #e3e6ec; }
@@ -1852,7 +1954,15 @@ function dispatchHtml(selectedIncidentId = null) {
     button { border: 0; border-radius: 8px; background: #1b73e8; color: white; padding: 11px 14px; font-weight: 700; cursor: pointer; }
     button.secondary { background: #455469; }
     .brief { line-height: 1.45; }
-    .empty { color: #5c6777; }
+    .empty { color: #5c6777; font-size: 13px; }
+    .field-reports { max-height: 38vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+    .note-card { background: #f8fafc; border: 1px solid #dfe4ec; border-radius: 8px; padding: 10px; font-size: 13px; }
+    .note-card .meta { font-size: 12px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: baseline; }
+    .note-card .counts { font-size: 12px; color: #5c6777; margin-bottom: 4px; }
+    .note-card .note-text { margin: 4px 0 0; font-size: 13px; color: #222; line-height: 1.35; }
+    .badge-safe { color: #16794c; font-weight: 700; background: #e6f4ea; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+    .badge-injured { color: #b42318; font-weight: 700; background: #fde2e1; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+    .badge-unknown { color: #5c6777; font-weight: 600; background: #e3e6ec; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
     .tablewrap { overflow-x: auto; }
     aside .panel { overflow-wrap: anywhere; }
     .timeline table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 8px; }
@@ -1865,13 +1975,15 @@ function dispatchHtml(selectedIncidentId = null) {
 </head>
 <body>
   <header>
-    <strong>EchoShield Simulated Dispatch</strong>
-    <a href="/dashboard">Relay dashboard</a>
+    <div style="display: flex; align-items: center; gap: 16px;">
+      <strong>EchoShield Simulated Dispatch</strong>
+      <a href="/dashboard">Relay dashboard</a>
+    </div>
+    ${API_KEY ? '<a href="/logout" style="color: #9ad0ff; font-size: 13px; text-decoration: none;">Log out</a>' : ''}
   </header>
-  <main>
-    <nav>
+  <main>\n    <nav>
       <h2>Incidents</h2>
-      ${incidentOptions || '<p class="empty">No incidents yet.</p>'}
+      ${incidentOptions || '<p class=\"empty\">No incidents yet.</p>'}
     </nav>
     <section>
       ${selected ? `
@@ -1905,6 +2017,12 @@ function dispatchHtml(selectedIncidentId = null) {
     </section>
     <aside>
       <div class="panel">
+        <h2>Field Reports (${selected?.notes?.length || 0})</h2>
+        <div class="field-reports">
+          ${notesRows || '<p class="empty">No room status reports submitted yet.</p>'}
+        </div>
+      </div>
+      <div class="panel">
         <h2>Live Updates</h2>
         <ul>${liveUpdateRows || '<li class="empty">No live updates yet.</li>'}</ul>
       </div>
@@ -1929,8 +2047,7 @@ function dispatchHtml(selectedIncidentId = null) {
         await fetch("/v1/incidents/" + encodeURIComponent(incidentId) + "/authority-messages", {
           method: "POST",
           headers: { 
-            "content-type": "application/json",
-            "authorization": "Bearer ${API_KEY}"
+            "content-type": "application/json"
           },
           body: JSON.stringify({
             sender: document.getElementById("sender").value || "Demo Dispatcher",
@@ -1948,8 +2065,7 @@ function dispatchHtml(selectedIncidentId = null) {
         const ok = window.confirm("Clear all notifications/messages for this incident?");
         if (!ok) return;
         await fetch("/v1/incidents/" + encodeURIComponent(incidentId) + "/clear-notifications", {
-          method: "POST",
-          headers: { "authorization": "Bearer ${API_KEY}" }
+          method: "POST"
         });
         window.location.reload();
       });
@@ -3256,12 +3372,94 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === "GET" && pathname === "/login") {
+    if (!API_KEY || authenticate(req)) {
+      res.writeHead(302, { "location": "/dispatch", "cache-control": "no-store" });
+      res.end();
+      return;
+    }
+    text(res, 200, loginHtml("/dispatch"), "text/html; charset=utf-8");
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/login") {
+    const raw = await readRawBody(req);
+    let key = "";
+    let redirect = "/dispatch";
+    const contentType = req.headers["content-type"] || "";
+    if (contentType.includes("application/json")) {
+      try {
+        const body = JSON.parse(raw || "{}");
+        key = body.key || "";
+        redirect = body.redirect || "/dispatch";
+      } catch (_) {}
+    } else {
+      const form = parseFormData(raw);
+      key = form.key || "";
+      redirect = form.redirect || "/dispatch";
+    }
+
+    if (API_KEY && key === API_KEY) {
+      res.writeHead(302, {
+        "location": safeConsoleRedirect(redirect),
+        "set-cookie": `echoshield_auth=${encodeURIComponent(key)}; Path=/; HttpOnly; SameSite=Lax`,
+        "cache-control": "no-store"
+      });
+      res.end();
+      return;
+    }
+
+    text(res, 401, loginHtml(redirect, "Invalid relay key"), "text/html; charset=utf-8");
+    return;
+  }
+
+  if (pathname === "/logout") {
+    res.writeHead(302, {
+      "location": "/login",
+      "set-cookie": "echoshield_auth=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax",
+      "cache-control": "no-store"
+    });
+    res.end();
+    return;
+  }
+
   if (req.method === "GET" && (pathname === "/" || pathname === "/dashboard")) {
+    if (API_KEY) {
+      if (url.searchParams.get("key") === API_KEY) {
+        res.writeHead(302, {
+          "location": pathname,
+          "set-cookie": `echoshield_auth=${encodeURIComponent(API_KEY)}; Path=/; HttpOnly; SameSite=Lax`,
+          "cache-control": "no-store"
+        });
+        res.end();
+        return;
+      }
+      if (!authenticate(req)) {
+        text(res, 401, loginHtml(pathname), "text/html; charset=utf-8");
+        return;
+      }
+    }
     text(res, 200, dashboardHtml(), "text/html; charset=utf-8");
     return;
   }
 
   if (req.method === "GET" && pathname === "/dispatch") {
+    if (API_KEY) {
+      if (url.searchParams.get("key") === API_KEY) {
+        const redir = url.searchParams.has("incident") ? `/dispatch?incident=${encodeURIComponent(url.searchParams.get("incident"))}` : "/dispatch";
+        res.writeHead(302, {
+          "location": redir,
+          "set-cookie": `echoshield_auth=${encodeURIComponent(API_KEY)}; Path=/; HttpOnly; SameSite=Lax`,
+          "cache-control": "no-store"
+        });
+        res.end();
+        return;
+      }
+      if (!authenticate(req)) {
+        text(res, 401, loginHtml(url.pathname + (url.search || "")), "text/html; charset=utf-8");
+        return;
+      }
+    }
     text(res, 200, dispatchHtml(url.searchParams.get("incident")), "text/html; charset=utf-8");
     return;
   }

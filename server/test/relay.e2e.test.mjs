@@ -83,7 +83,7 @@ let viewer;
 
 test("pages and read endpoints respond", async () => {
   for (const p of ["/app", "/opius", "/dispatch", "/v1/time", "/v1/mesh/status", "/v1/incidents"]) {
-    const r = await fetch(BASE + p);
+    const r = await fetch(BASE + p, { headers: { authorization: "Bearer test-relay-key" } });
     assert.equal(r.status, 200, p);
   }
 });
@@ -190,7 +190,7 @@ test("later shots build one incident timeline with direction of movement", async
   assert.match(latest.incident.policeBrief, /3 shots/);
   assert.equal(latest.incident.shots, undefined, "raw shot records stay server-side");
 
-  const page = await fetch(`${BASE}/dispatch`).then((r) => r.text());
+  const page = await fetch(`${BASE}/dispatch`, { headers: { authorization: "Bearer test-relay-key" } }).then((r) => r.text());
   assert.match(page, /Shot timeline/);
   assert.match(page, /ACTIVE FIRE/);
 });
