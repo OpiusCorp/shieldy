@@ -11,6 +11,13 @@ cd server
 npm start
 ```
 
+Test and simulate:
+
+```bash
+npm test          # analysis unit tests + end-to-end relay test (starts its own server)
+npm run simulate  # localization accuracy tables quoted in docs/GUNSHOT_ACOUSTICS_INDOORS.md
+```
+
 Open:
 
 - `http://localhost:8787/health`

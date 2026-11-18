@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "relay",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server/src/server.js"],
+      "env": { "PORT": "8798", "HOST": "127.0.0.1", "ECHOSHIELD_RELAY_API_KEY": "", "GEMINI_API_KEY": "", "GOOGLE_API_KEY": "" },
+      "port": 8798
+    }
+  ]
+}

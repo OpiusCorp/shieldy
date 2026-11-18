@@ -89,6 +89,18 @@ describe("Responder Console Security & Field Reports (Authenticated Mode)", () =
     assert.ok(cookie.includes("HttpOnly"));
   });
 
+  test("login redirects stay within the responder console", async () => {
+    for (const redirect of ["//example.com", "/\\example.com", "https://example.com", 123, "/opius"]) {
+      const res = await fetch(`${base}/login`, {
+        method: "POST", redirect: "manual",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key: API_KEY, redirect })
+      });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get("location"), "/dispatch");
+    }
+  });
+
   test("GET /dispatch and /dashboard with session cookie succeed and do NOT contain API key in HTML", async () => {
     const cookieHeader = `echoshield_auth=${encodeURIComponent(API_KEY)}`;
     for (const path of ["/dashboard", "/dispatch"]) {
