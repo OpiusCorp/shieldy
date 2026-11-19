@@ -456,6 +456,15 @@ class AudioSensorService : Service() {
     )
 
     private fun initializeAudioRecord(): AudioRecordConfig? {
+        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.RECORD_AUDIO
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.w(TAG, "RECORD_AUDIO permission not granted")
+            return null
+        }
+
         for (rate in CANDIDATE_SAMPLE_RATES) {
             val minBufferSizeBytes = AudioRecord.getMinBufferSize(rate, CHANNEL_CONFIG, AUDIO_FORMAT)
             if (minBufferSizeBytes <= 0 || minBufferSizeBytes == AudioRecord.ERROR || minBufferSizeBytes == AudioRecord.ERROR_BAD_VALUE) {
@@ -481,6 +490,8 @@ class AudioSensorService : Service() {
                     Log.w(TAG, "AudioRecord not initialized at ${rate}Hz")
                     record.release()
                 }
+            } catch (e: SecurityException) {
+                Log.w(TAG, "SecurityException creating AudioRecord at ${rate}Hz: ${e.message}")
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to create AudioRecord at ${rate}Hz: ${e.message}")
             }
