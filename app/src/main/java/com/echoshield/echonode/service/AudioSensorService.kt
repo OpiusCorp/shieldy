@@ -43,9 +43,10 @@ class AudioSensorService : Service() {
         // ─────────────────────────────────────────────────────────────────────
         // AUDIO CAPTURE SETTINGS
         // ─────────────────────────────────────────────────────────────────────
-        private const val SAMPLE_RATE = 44100
+        private val CANDIDATE_SAMPLE_RATES = intArrayOf(16000, 44100, 48000)
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
+        private const val BYTES_PER_SAMPLE = 2
 
         // ─────────────────────────────────────────────────────────────────────
         // TWO-TIER DETECTOR TUNING CONSTANTS
@@ -53,17 +54,9 @@ class AudioSensorService : Service() {
         
         // TIER 1: Low-power activity gate
         // EMA alpha: higher = more responsive to spikes, lower = more stable.
-        // 0.4 is responsive enough for impulsive sounds like gunshots while
-        // still filtering out brief noise. Original was 0.15 which over-dampened spikes.
         private const val EMA_ALPHA = 0.4
         
-        // Gate threshold is read from SystemEventFlow.detectionThreshold (default 200).
-        // Tune higher to reduce false gate opens from speech/ambient noise.
-        // Typical quiet room ~50-100 RMS, speech ~200-500, clap/loud ~800+.
-        
         // PEAK detection: Gunshots are impulsive sounds with high peak-to-RMS ratio.
-        // Use peak amplitude (max sample) as alternative gate trigger.
-        // Normalized peaks > 0.3 (~9800 raw) often indicate impulsive transients.
         private const val PEAK_THRESHOLD_NORMALIZED = 0.25f
         
         // If peak/RMS ratio is high, the sound is likely impulsive (like a gunshot)
@@ -71,12 +64,7 @@ class AudioSensorService : Service() {
 
         // CLIPPING: Cheap phone mics saturate on nearby gunshots (samples pin to
         // ±32767). A sample is "clipped" when its magnitude is within CLIP_MARGIN of
-        // full scale. Two thresholds:
-        //  - CLIP_FRACTION_GATE: enough saturation to treat the frame as an impulsive
-        //    transient and open the activity gate (a strong gunshot cue).
-        //  - CLIP_FRACTION_SEVERE: so much saturation the waveform is destroyed and
-        //    YAMNet confidence is unreliable; we relax the ML threshold so a real,
-        //    close shot that clips the mic is not missed.
+        // full scale.
         private const val CLIP_MARGIN = 64                 // within ~0.2% of full scale
         private const val CLIP_FRACTION_GATE = 0.005f      // 0.5% of samples clipped
         private const val CLIP_FRACTION_SEVERE = 0.02f     // 2% of samples clipped
@@ -85,39 +73,27 @@ class AudioSensorService : Service() {
 
         // TIER 2: ML confirmation
         // Gunshot confidence threshold. YAMNet typically outputs 0.0-1.0 for each class.
-        // 0.10 is more sensitive - lowered from 0.15 since we need more positives.
-        // Increase to 0.20-0.35 if getting too many false positives.
         private const val GUNSHOT_CONFIDENCE_THRESHOLD = 0.10f
         // Minimum consecutive high-confidence frames before trigger.
-        // Prevents single-frame noise spikes from triggering.
         private const val MIN_CONSECUTIVE_DETECTIONS = 1
         
         // ML inference rate limit. Running inference too often drains battery.
-        // 400ms provides ~2.5 inferences/sec when gate is open.
         private const val MODEL_INFERENCE_INTERVAL_MS = 400L
 
         // COOLDOWN: Prevent rapid re-triggers after a detection.
-        // 5 seconds allows situation assessment before next alert.
         private const val TRIGGER_COOLDOWN_MS = 5000L
         
         // Telemetry update rate for UI. 100ms = 10 updates/sec.
         private const val AMPLITUDE_UPDATE_INTERVAL_MS = 100L
 
         // ─────────────────────────────────────────────────────────────────────
-        // MODEL SETTINGS (TFLite YAMNet expects 16kHz input, 3s window)
+        // MODEL SETTINGS (TFLite YAMNet expects 16kHz input, ~0.975s window)
         // ─────────────────────────────────────────────────────────────────────
         private const val MODEL_SAMPLE_RATE = 16000
         private const val MODEL_INPUT_SAMPLES = LegacyTfLiteGunshotClassifier.INPUT_SAMPLES
 
         // ─────────────────────────────────────────────────────────────────────
-        // RETROSPECTIVE AUDIO HISTORY
-        //
-        // A gunshot is over in milliseconds, but a peer's WAKE_CLASSIFY takes time
-        // to cross the mesh. Classifying "the last second of audio" at the moment
-        // the request arrives can therefore miss the shot entirely and vote NO on a
-        // real event — which silently breaks consensus. Every node instead keeps
-        // several seconds of audio so it can look *back* to the moment it heard the
-        // impulse and classify that window.
+        // RETROSPECTIVE AUDIO HISTORY & TIMING
         // ─────────────────────────────────────────────────────────────────────
         private const val HISTORY_SECONDS = 4
         private const val HISTORY_SAMPLES = MODEL_SAMPLE_RATE * HISTORY_SECONDS
@@ -130,10 +106,13 @@ class AudioSensorService : Service() {
         // timestamping for triangulation.
         private const val IMPULSE_ONSET_PEAK_NORMALIZED = 0.15f
 
-        // Audio kept *after* the impulse onset in the classified window. Indoors the
-        // report arrives smeared into a reverberant tail, and YAMNet keys on that
-        // whole envelope, so the window is centred late rather than on the onset.
-        private const val WINDOW_TAIL_MS = 500L
+        // Audio kept after the impulse onset in the classified window to capture
+        // reverberant decay.
+        private const val WINDOW_TAIL_MS = 300L
+
+        // Maximum duration to wait for tail accumulation before forcing classification
+        // so that sustained noise or rapid impulses do not indefinitely postpone inference.
+        private const val MAX_TAIL_WAIT_MS = 450L
 
         fun startService(context: Context) {
             val intent = Intent(context, AudioSensorService::class.java)
@@ -166,7 +145,7 @@ class AudioSensorService : Service() {
     private var consecutiveHighConfidence = 0
     private var currentGateOpen = false
 
-    // Sentinel duty state - controls whether this device captures audio at all
+    // Sentinel duty state - controls whether this device acts as sentinel or pre-roll listener
     @Volatile
     private var isSentinelActive = true
     @Volatile
@@ -176,14 +155,10 @@ class AudioSensorService : Service() {
     private var dutyMonitorJob: Job? = null
     private var wakeRequestJob: Job? = null
     
-    // Retrospective audio history, shared by the detection loop and by wake
-    // classification. Written by the capture loop, read by classification on another
-    // coroutine, so all access is under historyLock.
-    private val historyLock = Any()
-    private val historyBuffer = FloatArray(HISTORY_SAMPLES)
-    private var historyWriteIndex = 0
-    private var historySamplesWritten = 0L
-    private var historyEndTimeMs = 0L
+    // Thread-safe circular audio buffer and resampler
+    private val rollingAudioBuffer = RollingAudioBuffer(HISTORY_SAMPLES, MODEL_SAMPLE_RATE)
+    @Volatile
+    private var actualSampleRate: Int = MODEL_SAMPLE_RATE
 
     /** Wall-clock time this node's microphone last heard an impulsive onset. */
     @Volatile
@@ -216,16 +191,15 @@ class AudioSensorService : Service() {
         startDutyMonitoring()
         startWakeRequestHandling()
         
-        // Only start audio recording if we're the sentinel
-        // Duty monitoring will start/stop recording based on assignment
+        // Start continuous audio recording for rolling pre-roll buffer
         val assignment = meshNetworkManager.dutyAssignment.value
         isSentinelActive = assignment.audioSentinelDuty
         if (isSentinelActive) {
-            Log.i(TAG, "Starting as SENTINEL - audio capture active")
-            startAudioRecording()
+            Log.i(TAG, "Starting as SENTINEL - active detection enabled")
         } else {
-            Log.i(TAG, "Starting as NON-SENTINEL - audio capture paused (battery saving)")
+            Log.i(TAG, "Starting as NON-SENTINEL - pre-roll recording active (low CPU)")
         }
+        startAudioRecording()
         
         SystemEventFlow.setServiceRunning(true)
         
@@ -244,14 +218,17 @@ class AudioSensorService : Service() {
                     Log.i(TAG, "Sentinel duty changed: active=$isSentinelActive (leader=${assignment.sentinelNodeId})")
                     
                     if (isSentinelActive) {
-                        // Became sentinel - start audio capture
-                        startAudioRecording()
+                        locationProvider?.startLocationUpdates()
                     } else {
-                        // No longer sentinel - stop audio capture to save battery
-                        stopAudioRecording()
+                        locationProvider?.stopLocationUpdates()
                         currentGateOpen = false
                         consecutiveHighConfidence = 0
                         SystemEventFlow.updateGateOpen(false)
+                    }
+                    // Audio capture remains running in the background into rollingAudioBuffer
+                    // so that non-sentinels retain pre-roll history for peer wake requests.
+                    if (audioRecordingJob?.isActive != true) {
+                        startAudioRecording()
                     }
                 }
             }
@@ -275,35 +252,27 @@ class AudioSensorService : Service() {
             return
         }
 
-        // Already listening: the shot is in our history buffer, so answer from it.
-        if (audioRecordingJob?.isActive == true && hasEnoughHistory()) {
+        // Already recording with enough pre-roll: answer from retained history immediately.
+        if (audioRecordingJob?.isActive == true && rollingAudioBuffer.hasEnoughSamples(MODEL_INPUT_SAMPLES)) {
             classifyAndVote(sessionId)
             return
         }
 
-        // Not listening - start capture and vote as soon as we have a full window.
-        // This node cannot contribute an arrival time (it was not listening when the
-        // shot happened), so its vote counts toward consensus but not triangulation.
+        // Not yet enough history: mark pending and vote once window fills.
         isProcessingWakeRequest = true
         wakeVoteDispatched = false
         pendingWakeSessionId = sessionId
-        resetHistory()
 
-        Log.i(TAG, "Starting wake audio capture for session=$sessionId")
-        // Ensure we have a position fix so this node's vote can contribute to
-        // triangulation, even though non-sentinels normally keep location idle.
+        Log.i(TAG, "Waiting for pre-roll buffer to fill for session=$sessionId")
         locationProvider?.startLocationUpdates()
-        startAudioRecording()
+        if (audioRecordingJob?.isActive != true) {
+            startAudioRecording()
+        }
     }
 
     /**
-     * Classify this node's *own* audio for a peer's detection session and vote.
-     *
-     * The window classified is the one ending at the moment this microphone last
-     * heard an impulsive onset (if that was recent enough to be the same event),
-     * not simply the latest audio — otherwise mesh latency would have us classifying
-     * the silence *after* the shot. That same onset time is reported as this node's
-     * arrival time, which is what makes TDoA triangulation possible.
+     * Classify this node's own audio for a peer's detection session and vote.
+     * Retains exact confidence, altitude, and arrival metadata.
      */
     private fun classifyAndVote(sessionId: String) {
         serviceScope.launch(Dispatchers.IO) {
@@ -318,7 +287,6 @@ class AudioSensorService : Service() {
                 val now = System.currentTimeMillis()
                 val impulseAt = lastImpulseAtMs
                 val heardImpulse = impulseAt > 0L && now - impulseAt <= IMPULSE_MEMORY_MS
-                // Give the model the tail of the impulse, not just its leading edge.
                 val windowEnd = if (heardImpulse) impulseAt + WINDOW_TAIL_MS else now
                 val arrivalAtMs = if (heardImpulse) impulseAt else Triangulation.NO_TIMING
 
@@ -330,9 +298,9 @@ class AudioSensorService : Service() {
                     return@launch
                 }
 
-                val modelInput = snapshotHistoryAt(windowEnd)
+                val modelInput = rollingAudioBuffer.snapshotWindowAt(windowEnd, MODEL_INPUT_SAMPLES)
                 if (modelInput == null) {
-                    Log.w(TAG, "No audio history yet for $sessionId, voting NO")
+                    Log.w(TAG, "No audio history available for requested window ($windowEnd) in $sessionId, voting NO")
                     meshNetworkManager.submitClassifyVote(
                         sessionId, false, 0f, voterLat, voterLon, voterAlt, Triangulation.NO_TIMING
                     )
@@ -355,8 +323,6 @@ class AudioSensorService : Service() {
                         latitude = voterLat,
                         longitude = voterLon,
                         altitude = voterAlt,
-                        // Only claim an arrival time when we actually heard something;
-                        // a guessed timestamp would corrupt the triangulation.
                         detectedAtMs = if (isGunshot) arrivalAtMs else Triangulation.NO_TIMING
                     )
                     SystemEventFlow.updateModelInference(result.gunshotConfidence, result.topLabel)
@@ -369,13 +335,8 @@ class AudioSensorService : Service() {
             } finally {
                 isProcessingWakeRequest = false
                 pendingWakeSessionId = null
-
-                // If not sentinel, stop audio capture after classification
                 if (!isSentinelActive) {
-                    serviceScope.launch(Dispatchers.Main) {
-                        stopAudioRecording()
-                        Log.d(TAG, "Stopped wake audio capture (not sentinel)")
-                    }
+                    locationProvider?.stopLocationUpdates()
                 }
             }
         }
@@ -472,39 +433,67 @@ class AudioSensorService : Service() {
         wakeLock = null
     }
 
+    private data class AudioRecordConfig(
+        val audioRecord: AudioRecord,
+        val sampleRate: Int,
+        val bufferSizeSamples: Int
+    )
+
+    private fun initializeAudioRecord(): AudioRecordConfig? {
+        for (rate in CANDIDATE_SAMPLE_RATES) {
+            val minBufferSizeBytes = AudioRecord.getMinBufferSize(rate, CHANNEL_CONFIG, AUDIO_FORMAT)
+            if (minBufferSizeBytes <= 0 || minBufferSizeBytes == AudioRecord.ERROR || minBufferSizeBytes == AudioRecord.ERROR_BAD_VALUE) {
+                Log.w(TAG, "AudioRecord minBufferSize invalid for rate $rate: $minBufferSizeBytes")
+                continue
+            }
+
+            val minBufferSizeSamples = minBufferSizeBytes / BYTES_PER_SAMPLE
+            val recordBufferSizeBytes = minBufferSizeBytes * 2
+
+            try {
+                val record = AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    rate,
+                    CHANNEL_CONFIG,
+                    AUDIO_FORMAT,
+                    recordBufferSizeBytes
+                )
+                if (record.state == AudioRecord.STATE_INITIALIZED) {
+                    Log.i(TAG, "AudioRecord initialized at ${rate}Hz (bufferBytes=$minBufferSizeBytes, bufferSamples=$minBufferSizeSamples)")
+                    return AudioRecordConfig(record, rate, minBufferSizeSamples)
+                } else {
+                    Log.w(TAG, "AudioRecord not initialized at ${rate}Hz")
+                    record.release()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to create AudioRecord at ${rate}Hz: ${e.message}")
+            }
+        }
+        return null
+    }
+
     private fun startAudioRecording() {
         if (audioRecordingJob?.isActive == true) {
             Log.d(TAG, "Audio recording already active")
             return
         }
 
-        val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-        if (bufferSize == AudioRecord.ERROR_BAD_VALUE || bufferSize == AudioRecord.ERROR) {
-            Log.e(TAG, "Invalid buffer size: $bufferSize")
+        val config = initializeAudioRecord()
+        if (config == null) {
+            Log.e(TAG, "Failed to initialize AudioRecord with any candidate sample rate")
             return
         }
 
+        audioRecord = config.audioRecord
+        actualSampleRate = config.sampleRate
+        val bufferSizeSamples = config.bufferSizeSamples
+
         try {
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE,
-                CHANNEL_CONFIG,
-                AUDIO_FORMAT,
-                bufferSize * 2
-            )
-
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e(TAG, "AudioRecord failed to initialize")
-                audioRecord?.release()
-                audioRecord = null
-                return
-            }
-
             audioRecord?.startRecording()
-            Log.d(TAG, "Audio recording started with buffer size: $bufferSize")
+            Log.d(TAG, "Audio recording started at ${actualSampleRate}Hz with buffer size: $bufferSizeSamples samples")
 
             audioRecordingJob = serviceScope.launch {
-                processAudioStream(bufferSize)
+                processAudioStream(bufferSizeSamples)
             }
         } catch (e: SecurityException) {
             Log.e(TAG, "Security exception starting audio recording", e)
@@ -513,8 +502,8 @@ class AudioSensorService : Service() {
         }
     }
 
-    private suspend fun processAudioStream(bufferSize: Int) {
-        val buffer = ShortArray(bufferSize)
+    private suspend fun processAudioStream(bufferSizeSamples: Int) {
+        val buffer = ShortArray(bufferSizeSamples)
         var lastAmplitudeUpdate = 0L
         var lastModelInference = 0L
 
@@ -536,23 +525,23 @@ class AudioSensorService : Service() {
                 val clippingGate = clipFraction >= CLIP_FRACTION_GATE
                 val clippingSevere = clipFraction >= CLIP_FRACTION_SEVERE
 
-                // Every frame goes into the shared history, whether or not this node
-                // is the sentinel, so a peer's wake request can be answered from the
-                // audio at the moment of the shot.
-                appendHistory(buffer, readResult, currentTime)
-
-                // Timestamp the impulse itself, to sample accuracy within the frame:
-                // sound covers 0.343 m per millisecond, so this is what triangulation
-                // resolution ultimately rests on.
-                if (peakNormalized >= IMPULSE_ONSET_PEAK_NORMALIZED || clippingGate) {
-                    val frameStartMs = currentTime - (readResult * 1000L / SAMPLE_RATE)
-                    lastImpulseAtMs = frameStartMs + (peakIndex * 1000L / SAMPLE_RATE)
+                // Feed rolling pre-roll buffer using native write or stateful resampler
+                if (actualSampleRate == MODEL_SAMPLE_RATE) {
+                    rollingAudioBuffer.write(buffer, readResult, currentTime)
+                } else {
+                    rollingAudioBuffer.writeResampled(buffer, readResult, actualSampleRate, currentTime)
                 }
 
-                // A woken non-sentinel votes as soon as it has a full window, once.
+                // Timestamp the impulse itself to sample accuracy using actual capture rate
+                if (peakNormalized >= IMPULSE_ONSET_PEAK_NORMALIZED || clippingGate) {
+                    val frameStartMs = currentTime - (readResult * 1000L / actualSampleRate)
+                    lastImpulseAtMs = frameStartMs + (peakIndex * 1000L / actualSampleRate)
+                }
+
+                // A woken non-sentinel votes once enough history is buffered
                 if (isProcessingWakeRequest && !isSentinelActive) {
                     val sessionId = pendingWakeSessionId
-                    if (!wakeVoteDispatched && sessionId != null && hasEnoughHistory()) {
+                    if (!wakeVoteDispatched && sessionId != null && rollingAudioBuffer.hasEnoughSamples(MODEL_INPUT_SAMPLES)) {
                         wakeVoteDispatched = true
                         Log.i(TAG, "Wake capture window filled, classifying for session=$sessionId")
                         classifyAndVote(sessionId)
@@ -561,7 +550,7 @@ class AudioSensorService : Service() {
                 }
 
                 if (!isSentinelActive) {
-                    // Not sentinel and not processing a wake request: history only.
+                    // Non-sentinels retain pre-roll history only (low CPU/battery)
                     continue
                 }
 
@@ -579,20 +568,15 @@ class AudioSensorService : Service() {
                     lastAmplitudeUpdate = currentTime
                 }
 
-                // TIER 1: Activity gate check - multiple criteria for sensitivity
-                // 1. RMS threshold: catches sustained loud sounds
-                // 2. Peak threshold: catches impulsive transients (gunshots have high peaks)
-                // 3. Impulsive ratio: high peak-to-RMS ratio indicates transient sounds
+                // TIER 1: Activity gate check
                 val gateThreshold = SystemEventFlow.detectionThreshold.value
                 val rmsGateOpen = instantRms >= gateThreshold
                 val peakGateOpen = peakNormalized >= PEAK_THRESHOLD_NORMALIZED
                 val impulsiveSound = instantRms > 50 && (peakAmplitude / instantRms) > IMPULSIVE_PEAK_RMS_RATIO
 
-                // Open gate if ANY of the criteria are met (more sensitive).
-                // Mic clipping is itself a strong impulsive cue for a nearby gunshot.
-                val gateOpen = (rmsGateOpen || peakGateOpen || impulsiveSound || clippingGate) && hasEnoughHistory()
+                val gateOpen = (rmsGateOpen || peakGateOpen || impulsiveSound || clippingGate) &&
+                    rollingAudioBuffer.hasEnoughSamples(MODEL_INPUT_SAMPLES)
                 
-                // Update gate state telemetry if changed
                 if (gateOpen != currentGateOpen) {
                     currentGateOpen = gateOpen
                     SystemEventFlow.updateGateOpen(gateOpen)
@@ -611,92 +595,85 @@ class AudioSensorService : Service() {
                     }
                 }
 
-                // TIER 2: ML inference only when gate is open, classifier ready, and rate limit allows
-                val shouldRunModel = gateOpen && legacyTfReady &&
+                // TIER 2: Bounded post-impulse tail accumulation before ML inference
+                val tailTargetTimeMs = if (lastImpulseAtMs > 0L) lastImpulseAtMs + WINDOW_TAIL_MS else currentTime
+                val tailReady = (currentTime >= tailTargetTimeMs) ||
+                    (lastImpulseAtMs > 0L && currentTime - lastImpulseAtMs >= MAX_TAIL_WAIT_MS)
+
+                val shouldRunModel = gateOpen && legacyTfReady && tailReady &&
                     (currentTime - lastModelInference >= MODEL_INFERENCE_INTERVAL_MS)
 
                 if (shouldRunModel) {
                     lastModelInference = currentTime
-                    val modelInput = snapshotHistoryAt(currentTime)
-                    val result = if (modelInput == null) null else classifyTfLite(modelInput)
+                    val windowEnd = minOf(currentTime, tailTargetTimeMs)
+                    val modelInput = rollingAudioBuffer.snapshotWindowAt(windowEnd, MODEL_INPUT_SAMPLES)
 
-                    if (result != null) {
-                        // Log every inference for debugging detection issues.
-                        // When the mic is severely clipped the ML input waveform is
-                        // distorted, so relax the threshold to avoid missing a real
-                        // close-range shot that saturated the microphone.
-                        val effectiveThreshold =
-                            if (clippingSevere) CLIPPED_CONFIDENCE_THRESHOLD else GUNSHOT_CONFIDENCE_THRESHOLD
-                        val isAboveThreshold = result.gunshotConfidence >= effectiveThreshold
-                        Log.d(TAG, "ML: score=${"%.3f".format(result.gunshotConfidence)} " +
-                            "(thresh=$effectiveThreshold clip=${"%.3f".format(clipFraction)}, above=$isAboveThreshold) " +
-                            "top=${result.topLabel}@${"%.3f".format(result.topScore)}")
-                        
-                        SystemEventFlow.updateModelInference(
-                            gunshotConfidence = result.gunshotConfidence,
-                            topLabel = result.topLabel
-                        )
+                    if (modelInput != null) {
+                        val result = classifyTfLite(modelInput)
 
-                        // Track consecutive high-confidence frames
-                        if (isAboveThreshold) {
-                            consecutiveHighConfidence++
-                            Log.i(TAG, "HIGH CONFIDENCE FRAME #$consecutiveHighConfidence")
-                        } else {
-                            consecutiveHighConfidence = 0
-                        }
-
-                        // Trigger only if consecutive threshold met AND cooldown expired
-                        if (consecutiveHighConfidence >= MIN_CONSECUTIVE_DETECTIONS &&
-                            cooldownRemaining == 0L) {
-                            Log.w(
-                                TAG,
-                                "SENTINEL DETECTED THREAT! score=${result.gunshotConfidence} " +
-                                "consecutive=$consecutiveHighConfidence top=${result.topLabel}"
-                            )
-                            lastTriggerTime = currentTime
-                            consecutiveHighConfidence = 0
+                        if (result != null) {
+                            val effectiveThreshold =
+                                if (clippingSevere) CLIPPED_CONFIDENCE_THRESHOLD else GUNSHOT_CONFIDENCE_THRESHOLD
+                            val isAboveThreshold = result.gunshotConfidence >= effectiveThreshold
+                            Log.d(TAG, "ML: score=${"%.3f".format(result.gunshotConfidence)} " +
+                                "(thresh=$effectiveThreshold clip=${"%.3f".format(clipFraction)}, above=$isAboveThreshold) " +
+                                "top=${result.topLabel}@${"%.3f".format(result.topScore)}")
                             
-                            // Get current location
-                            val location = locationProvider?.currentLocation?.value
-                            val lat = location?.latitude ?: 0.0
-                            val lon = location?.longitude ?: 0.0
-                            val alt = location?.altitude ?: Double.NaN
+                            SystemEventFlow.updateModelInference(
+                                gunshotConfidence = result.gunshotConfidence,
+                                topLabel = result.topLabel
+                            )
 
-                            val connectedPeers = meshNetworkManager.getConnectedPeerIds().size
-                            // Only handoff sentinel duty when peers are available. On a solo
-                            // device, disarming creates a long idle period during testing.
-                            if (connectedPeers > 0) {
-                                meshNetworkManager.disarmSentinel()
+                            if (isAboveThreshold) {
+                                consecutiveHighConfidence++
+                                Log.i(TAG, "HIGH CONFIDENCE FRAME #$consecutiveHighConfidence")
                             } else {
-                                Log.i(TAG, "Threat detected with no peers; keeping local sentinel active")
+                                consecutiveHighConfidence = 0
                             }
 
-                            // Report when *this* microphone heard the impulse, and our
-                            // real classifier score rather than a blanket 1.0 — the node
-                            // that fires first is the one most likely to be wrong, so it
-                            // must not dominate the triangulated fix.
-                            val impulseAt = lastImpulseAtMs
-                            val arrivalAtMs = if (impulseAt > 0L && currentTime - impulseAt <= IMPULSE_MEMORY_MS) {
-                                impulseAt
-                            } else {
-                                currentTime
-                            }
-                            meshNetworkManager.broadcastWakeClassify(
-                                latitude = lat,
-                                longitude = lon,
-                                confidence = result.gunshotConfidence,
-                                altitude = alt,
-                                detectedAtMs = arrivalAtMs
-                            )
+                            if (consecutiveHighConfidence >= MIN_CONSECUTIVE_DETECTIONS &&
+                                cooldownRemaining == 0L) {
+                                Log.w(
+                                    TAG,
+                                    "SENTINEL DETECTED THREAT! score=${result.gunshotConfidence} " +
+                                    "consecutive=$consecutiveHighConfidence top=${result.topLabel}"
+                                )
+                                lastTriggerTime = currentTime
+                                consecutiveHighConfidence = 0
+                                
+                                val location = locationProvider?.currentLocation?.value
+                                val lat = location?.latitude ?: 0.0
+                                val lon = location?.longitude ?: 0.0
+                                val alt = location?.altitude ?: Double.NaN
 
-                            Log.i(
-                                TAG,
-                                "WAKE_CLASSIFY broadcast at ($lat, $lon), peers=$connectedPeers " +
-                                    "conf=${result.gunshotConfidence} arrival=${currentTime - arrivalAtMs}ms ago"
-                            )
-                            
-                            // Note: Audio recording will stop when duty assignment updates
-                            // and isSentinelActive becomes false
+                                val connectedPeers = meshNetworkManager.getConnectedPeerIds().size
+                                if (connectedPeers > 0) {
+                                    meshNetworkManager.disarmSentinel()
+                                } else {
+                                    Log.i(TAG, "Threat detected with no peers; keeping local sentinel active")
+                                }
+
+                                val impulseAt = lastImpulseAtMs
+                                val arrivalAtMs = if (impulseAt > 0L && currentTime - impulseAt <= IMPULSE_MEMORY_MS) {
+                                    impulseAt
+                                } else {
+                                    currentTime
+                                }
+
+                                meshNetworkManager.broadcastWakeClassify(
+                                    latitude = lat,
+                                    longitude = lon,
+                                    confidence = result.gunshotConfidence,
+                                    altitude = alt,
+                                    detectedAtMs = arrivalAtMs
+                                )
+
+                                Log.i(
+                                    TAG,
+                                    "WAKE_CLASSIFY broadcast at ($lat, $lon), peers=$connectedPeers " +
+                                        "conf=${result.gunshotConfidence} arrival=${currentTime - arrivalAtMs}ms ago"
+                                )
+                            }
                         }
                     }
                 }
@@ -718,10 +695,6 @@ class AudioSensorService : Service() {
         return sqrt(sum / readSize)
     }
 
-    /**
-     * Fraction of samples in this frame that are saturated (pinned within CLIP_MARGIN
-     * of the 16-bit full-scale rails). A high value means the microphone clipped.
-     */
     private fun calculateClipFraction(buffer: ShortArray, readSize: Int): Float {
         if (readSize <= 0) return 0f
         val clipHigh = Short.MAX_VALUE - CLIP_MARGIN
@@ -736,7 +709,6 @@ class AudioSensorService : Service() {
         return clipped.toFloat() / readSize.toFloat()
     }
 
-    /** Index of the loudest sample in the frame — the impulse onset, to sample accuracy. */
     private fun indexOfMaxAmplitude(buffer: ShortArray, readSize: Int): Int {
         var maxAmplitude = -1
         var maxIndex = 0
@@ -748,85 +720,6 @@ class AudioSensorService : Service() {
             }
         }
         return maxIndex
-    }
-
-    /**
-     * Resample a 44.1 kHz frame down to the model's 16 kHz and append it to the
-     * history ring, stamping the frame's end time so windows can later be addressed
-     * by wall-clock instead of by position.
-     *
-     * Each output sample is the mean of the input samples it spans rather than a
-     * single picked sample: without that box filter, everything above 8 kHz aliases
-     * back down into the band, and a gunshot is exactly the broadband impulse that
-     * suffers most from it.
-     */
-    private fun appendHistory(source: ShortArray, size: Int, frameEndTimeMs: Long) {
-        val ratio = SAMPLE_RATE.toDouble() / MODEL_SAMPLE_RATE.toDouble()
-        synchronized(historyLock) {
-            var index = historyWriteIndex
-            var written = 0L
-            var sourcePos = 0.0
-            while (sourcePos < size) {
-                val start = sourcePos.toInt()
-                val end = ((sourcePos + ratio).toInt()).coerceAtMost(size)
-                var sum = 0f
-                var count = 0
-                for (i in start until end) {
-                    sum += source[i] / 32768f
-                    count++
-                }
-                historyBuffer[index] = if (count > 0) sum / count else 0f
-                index++
-                if (index >= historyBuffer.size) index = 0
-                written++
-                sourcePos += ratio
-            }
-            historyWriteIndex = index
-            historySamplesWritten += written
-            historyEndTimeMs = frameEndTimeMs
-        }
-    }
-
-    private fun hasEnoughHistory(): Boolean = synchronized(historyLock) {
-        historySamplesWritten >= MODEL_INPUT_SAMPLES
-    }
-
-    private fun resetHistory() {
-        synchronized(historyLock) {
-            historyWriteIndex = 0
-            historySamplesWritten = 0L
-            historyEndTimeMs = 0L
-        }
-        lastImpulseAtMs = 0L
-    }
-
-    /**
-     * A model-sized window of history ending at [endTimeMs] (wall clock). Older
-     * requests are clamped to the oldest audio still retained, future ones to the
-     * newest. Returns null until a full window has been captured.
-     */
-    private fun snapshotHistoryAt(endTimeMs: Long): FloatArray? {
-        synchronized(historyLock) {
-            if (historySamplesWritten < MODEL_INPUT_SAMPLES) return null
-
-            val msBehind = (historyEndTimeMs - endTimeMs).coerceAtLeast(0L)
-            val oldestOffset = minOf(
-                historySamplesWritten - MODEL_INPUT_SAMPLES,
-                (HISTORY_SAMPLES - MODEL_INPUT_SAMPLES).toLong()
-            )
-            val samplesBehind = (msBehind * MODEL_SAMPLE_RATE / 1000L).coerceIn(0L, oldestOffset)
-
-            val end = Math.floorMod(historyWriteIndex - samplesBehind.toInt(), HISTORY_SAMPLES)
-            val start = Math.floorMod(end - MODEL_INPUT_SAMPLES, HISTORY_SAMPLES)
-
-            val output = FloatArray(MODEL_INPUT_SAMPLES)
-            val firstChunk = minOf(MODEL_INPUT_SAMPLES, HISTORY_SAMPLES - start)
-            System.arraycopy(historyBuffer, start, output, 0, firstChunk)
-            if (firstChunk < MODEL_INPUT_SAMPLES) {
-                System.arraycopy(historyBuffer, 0, output, firstChunk, MODEL_INPUT_SAMPLES - firstChunk)
-            }
-            return output
-        }
     }
 
     private data class ClassificationResult(
@@ -861,12 +754,12 @@ class AudioSensorService : Service() {
         }
         audioRecord = null
         
-        // Reset all two-tier detector state and telemetry
         smoothedAmplitude = 0.0
         consecutiveHighConfidence = 0
         currentGateOpen = false
         
-        resetHistory()
+        rollingAudioBuffer.reset()
+        lastImpulseAtMs = 0L
         wakeVoteDispatched = false
         
         SystemEventFlow.updateAmplitude(0.0)
