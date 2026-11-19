@@ -1,0 +1,38 @@
+/private/tmp/shieldy-eval-venv/lib/python3.13/site-packages/tensorflow/lite/python/interpreter.py:457: UserWarning:     Warning: tf.lite.Interpreter is deprecated and is scheduled for deletion in
+    TF 2.20. Please use the LiteRT interpreter from the ai_edge_litert package.
+    See the [migration guide](https://ai.google.dev/edge/litert/migration)
+    for details.
+    
+  warnings.warn(_INTERPRETER_DELETION_WARNING)
+INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
+======================================================================
+        ECHOSHIELD ACOUSTIC DETECTOR EVALUATION & SCORING HARNESS      
+======================================================================
+[Corpus Generation] Generating deterministic test corpus (seed=42)...
+-> Boundary Suite: 40.0s, SHA256: ec7537d470054658...
+-> Hard Negatives: 46.0s, SHA256: 3fb30f80bce382dc...
+
+--- COMPARATIVE EVALUATION MATRIX (IDENTICAL CORPUS REPLAY) ---
+
++-------------------------------------+--------------+------------------+--------------+-------------+-------------+
+| Configuration                       | Event Recall | False Alert Rate | Hard Neg FPs | Latency p50 | Latency p90 |
++-------------------------------------+--------------+------------------+--------------+-------------+-------------+
+| Baseline Classifier (Bang/Expl/Cap) | 100.0%       | 391.3/hr         | 5 FPs        | 26.4ms      | 43.5ms      |
+| Tightened Classifier (Gunshot Only) | 100.0%       | 313.0/hr         | 4 FPs        | 26.4ms      | 43.5ms      |
+| Tightened + Post-Impulse Tail Wait  | 100.0%       | 78.3/hr          | 1 FPs        | 356.4ms     | 398.0ms     |
+| Tightened + Tail Wait + Polyphase   | 83.3%        | 0.0/hr           | 0 FPs        | 368.4ms     | 398.8ms     |
++-------------------------------------+--------------+------------------+--------------+-------------+-------------+
+
+
+--- HARD NEGATIVES FALSE ALERT BREAKDOWN ---
++---------------------+---------------+---------------------+------------------------+
+| Negative Sound Type | Tested Events | Legacy False Alerts | Tightened False Alerts |
++---------------------+---------------+---------------------+------------------------+
+| balloon_pop         | 1             | 1 FPs               | 1 FPs                  |
+| door_slam           | 2             | 2 FPs               | 1 FPs                  |
+| dropped_book        | 1             | 0 FPs               | 0 FPs                  |
+| hand_clap           | 2             | 2 FPs               | 2 FPs                  |
+| speech_shout        | 1             | 0 FPs               | 0 FPs                  |
++---------------------+---------------+---------------------+------------------------+
+
+Saved comparative metrics to /private/tmp/shieldy-combined-replay.json
