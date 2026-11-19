@@ -47,3 +47,7 @@ server/node_modules/
 
 # VSCode Counter
 .VSCodeCounter/
+
+# Evaluation artifacts
+eval_test.txt
+.pytest_cache/

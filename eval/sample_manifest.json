@@ -1,0 +1,182 @@
+{
+  "version": "1.0",
+  "description": "EchoShield acoustic detector evaluation manifest template and synthetic benchmark definition",
+  "total_recordings": 2,
+  "recordings": [
+    {
+      "recording_id": "synthetic_bench_boundary_offsets",
+      "audio_path": null,
+      "duration_sec": 38.0,
+      "sample_rate": 44100,
+      "environment": "synthetic_indoor_reverberant",
+      "is_synthetic": true,
+      "metadata": {
+        "description": "Probe 6 boundary offsets across 400ms inference hop grid and 975ms model window"
+      },
+      "events": [
+        {
+          "event_id": "evt_boundary_0ms",
+          "label": "gunshot",
+          "start_sec": 2.0,
+          "end_sec": 2.5,
+          "is_threat": true,
+          "boundary_offset_ms": 0.0,
+          "metadata": {
+            "peak_level": 28000.0,
+            "reverb_decay_sec": 0.15
+          }
+        },
+        {
+          "event_id": "evt_boundary_50ms",
+          "label": "gunshot",
+          "start_sec": 8.05,
+          "end_sec": 8.55,
+          "is_threat": true,
+          "boundary_offset_ms": 50.0,
+          "metadata": {
+            "peak_level": 28000.0,
+            "reverb_decay_sec": 0.15
+          }
+        },
+        {
+          "event_id": "evt_boundary_195ms",
+          "label": "gunshot",
+          "start_sec": 14.195,
+          "end_sec": 14.695,
+          "is_threat": true,
+          "boundary_offset_ms": 195.0,
+          "metadata": {
+            "peak_level": 28000.0,
+            "reverb_decay_sec": 0.15
+          }
+        },
+        {
+          "event_id": "evt_boundary_390ms",
+          "label": "gunshot",
+          "start_sec": 20.39,
+          "end_sec": 20.89,
+          "is_threat": true,
+          "boundary_offset_ms": 390.0,
+          "metadata": {
+            "peak_level": 28000.0,
+            "reverb_decay_sec": 0.15
+          }
+        },
+        {
+          "event_id": "evt_boundary_405ms",
+          "label": "gunshot",
+          "start_sec": 26.405,
+          "end_sec": 26.905,
+          "is_threat": true,
+          "boundary_offset_ms": 405.0,
+          "metadata": {
+            "peak_level": 28000.0,
+            "reverb_decay_sec": 0.15
+          }
+        },
+        {
+          "event_id": "evt_boundary_950ms",
+          "label": "gunshot",
+          "start_sec": 32.95,
+          "end_sec": 33.45,
+          "is_threat": true,
+          "boundary_offset_ms": 950.0,
+          "metadata": {
+            "peak_level": 28000.0,
+            "reverb_decay_sec": 0.15
+          }
+        }
+      ]
+    },
+    {
+      "recording_id": "synthetic_bench_hard_negatives",
+      "audio_path": null,
+      "duration_sec": 46.0,
+      "sample_rate": 44100,
+      "environment": "synthetic_hard_negatives_mix",
+      "is_synthetic": true,
+      "metadata": {
+        "description": "Impulsive non-threat sounds (door slam, hand clap, balloon pop, dropped book, speech shout)"
+      },
+      "events": [
+        {
+          "event_id": "evt_hn_door_slam_1",
+          "label": "door_slam",
+          "start_sec": 2.0,
+          "end_sec": 2.6,
+          "is_threat": false,
+          "boundary_offset_ms": null,
+          "metadata": {
+            "peak_level": 25000.0
+          }
+        },
+        {
+          "event_id": "evt_hn_hand_clap_1",
+          "label": "hand_clap",
+          "start_sec": 8.0,
+          "end_sec": 8.3,
+          "is_threat": false,
+          "boundary_offset_ms": null,
+          "metadata": {
+            "peak_level": 22000.0
+          }
+        },
+        {
+          "event_id": "evt_hn_balloon_pop_1",
+          "label": "balloon_pop",
+          "start_sec": 14.0,
+          "end_sec": 14.4,
+          "is_threat": false,
+          "boundary_offset_ms": null,
+          "metadata": {
+            "peak_level": 27000.0
+          }
+        },
+        {
+          "event_id": "evt_hn_dropped_book_1",
+          "label": "dropped_book",
+          "start_sec": 20.0,
+          "end_sec": 20.5,
+          "is_threat": false,
+          "boundary_offset_ms": null,
+          "metadata": {
+            "peak_level": 24000.0
+          }
+        },
+        {
+          "event_id": "evt_hn_speech_shout_1",
+          "label": "speech_shout",
+          "start_sec": 26.0,
+          "end_sec": 27.0,
+          "is_threat": false,
+          "boundary_offset_ms": null,
+          "metadata": {
+            "peak_level": 20000.0
+          }
+        },
+        {
+          "event_id": "evt_hn_hand_clap_2",
+          "label": "hand_clap",
+          "start_sec": 32.0,
+          "end_sec": 32.3,
+          "is_threat": false,
+          "boundary_offset_ms": null,
+          "metadata": {
+            "peak_level": 26000.0
+          }
+        },
+        {
+          "event_id": "evt_hn_door_slam_2",
+          "label": "door_slam",
+          "start_sec": 38.0,
+          "end_sec": 38.6,
+          "is_threat": false,
+          "boundary_offset_ms": null,
+          "metadata": {
+            "peak_level": 28000.0
+          }
+        }
+      ]
+    }
+  ]
+}
