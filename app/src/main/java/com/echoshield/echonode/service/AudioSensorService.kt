@@ -155,8 +155,13 @@ class AudioSensorService : Service() {
     private var dutyMonitorJob: Job? = null
     private var wakeRequestJob: Job? = null
     
-    // Thread-safe circular audio buffer and resampler
+    // Thread-safe circular audio buffer, resampler, and detection scheduler
     private val rollingAudioBuffer = RollingAudioBuffer(HISTORY_SAMPLES, MODEL_SAMPLE_RATE)
+    private val detectionScheduler = DetectionScheduler(
+        windowTailMs = WINDOW_TAIL_MS,
+        maxTailWaitMs = MAX_TAIL_WAIT_MS,
+        minInferenceIntervalMs = MODEL_INFERENCE_INTERVAL_MS
+    )
     @Volatile
     private var actualSampleRate: Int = MODEL_SAMPLE_RATE
 
@@ -289,6 +294,17 @@ class AudioSensorService : Service() {
                 val heardImpulse = impulseAt > 0L && now - impulseAt <= IMPULSE_MEMORY_MS
                 val windowEnd = if (heardImpulse) impulseAt + WINDOW_TAIL_MS else now
                 val arrivalAtMs = if (heardImpulse) impulseAt else Triangulation.NO_TIMING
+
+                // If the requested tail window is in the future relative to captured audio, wait for tail arrival
+                if (windowEnd > now) {
+                    val maxWaitMs = minOf(MAX_TAIL_WAIT_MS, (windowEnd - now) + 100L)
+                    val waitStart = System.currentTimeMillis()
+                    while (rollingAudioBuffer.lastWriteEndTimeMs < windowEnd &&
+                           System.currentTimeMillis() - waitStart < maxWaitMs &&
+                           audioRecordingJob?.isActive == true) {
+                        delay(20)
+                    }
+                }
 
                 if (!legacyTfReady) {
                     Log.w(TAG, "No classifier ready for wake vote, voting NO for $sessionId")
@@ -505,7 +521,6 @@ class AudioSensorService : Service() {
     private suspend fun processAudioStream(bufferSizeSamples: Int) {
         val buffer = ShortArray(bufferSizeSamples)
         var lastAmplitudeUpdate = 0L
-        var lastModelInference = 0L
 
         if (isSentinelActive) {
             locationProvider?.startLocationUpdates()
@@ -533,9 +548,13 @@ class AudioSensorService : Service() {
                 }
 
                 // Timestamp the impulse itself to sample accuracy using actual capture rate
-                if (peakNormalized >= IMPULSE_ONSET_PEAK_NORMALIZED || clippingGate) {
+                val detectedImpulseOnsetMs: Long? = if (peakNormalized >= IMPULSE_ONSET_PEAK_NORMALIZED || clippingGate) {
                     val frameStartMs = currentTime - (readResult * 1000L / actualSampleRate)
-                    lastImpulseAtMs = frameStartMs + (peakIndex * 1000L / actualSampleRate)
+                    val onset = frameStartMs + (peakIndex * 1000L / actualSampleRate)
+                    lastImpulseAtMs = onset
+                    onset
+                } else {
+                    null
                 }
 
                 // A woken non-sentinel votes once enough history is buffered
@@ -576,6 +595,9 @@ class AudioSensorService : Service() {
 
                 val gateOpen = (rmsGateOpen || peakGateOpen || impulsiveSound || clippingGate) &&
                     rollingAudioBuffer.hasEnoughSamples(MODEL_INPUT_SAMPLES)
+
+                // Latch pending event through gate closure and tail collection
+                detectionScheduler.onFrame(currentTime, gateOpen, detectedImpulseOnsetMs)
                 
                 if (gateOpen != currentGateOpen) {
                     currentGateOpen = gateOpen
@@ -595,21 +617,16 @@ class AudioSensorService : Service() {
                     }
                 }
 
-                // TIER 2: Bounded post-impulse tail accumulation before ML inference
-                val tailTargetTimeMs = if (lastImpulseAtMs > 0L) lastImpulseAtMs + WINDOW_TAIL_MS else currentTime
-                val tailReady = (currentTime >= tailTargetTimeMs) ||
-                    (lastImpulseAtMs > 0L && currentTime - lastImpulseAtMs >= MAX_TAIL_WAIT_MS)
-
-                val shouldRunModel = gateOpen && legacyTfReady && tailReady &&
-                    (currentTime - lastModelInference >= MODEL_INFERENCE_INTERVAL_MS)
+                // TIER 2: Bounded post-impulse tail accumulation via scheduler
+                val shouldRunModel = detectionScheduler.shouldRunInference(currentTime, legacyTfReady)
 
                 if (shouldRunModel) {
-                    lastModelInference = currentTime
-                    val windowEnd = minOf(currentTime, tailTargetTimeMs)
+                    val windowEnd = detectionScheduler.getTargetWindowEndMs(currentTime)
                     val modelInput = rollingAudioBuffer.snapshotWindowAt(windowEnd, MODEL_INPUT_SAMPLES)
 
                     if (modelInput != null) {
                         val result = classifyTfLite(modelInput)
+                        detectionScheduler.onInferenceCompleted(currentTime)
 
                         if (result != null) {
                             val effectiveThreshold =
@@ -759,6 +776,7 @@ class AudioSensorService : Service() {
         currentGateOpen = false
         
         rollingAudioBuffer.reset()
+        detectionScheduler.reset()
         lastImpulseAtMs = 0L
         wakeVoteDispatched = false
         
