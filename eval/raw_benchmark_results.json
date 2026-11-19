@@ -1,0 +1,107 @@
+{
+  "benchmark_type": "synthetic_calibrated_identical_corpus",
+  "corpus_seed": 42,
+  "boundary_corpus_sha256": "ec7537d47005465800134564976ad2eb93f7f47cef6d897eb90087346a07ad56",
+  "hard_negatives_corpus_sha256": "3fb30f80bce382dce2cba6112b0cad5d3e02c4f038fc88494b5e29477458e4e8",
+  "tested_detector_head_sha": "af6564b",
+  "model_executed": "yamnet.tflite (unquantized float32, bundled in app/src/main/assets)",
+  "class_map_source": "app/src/main/assets/yamnet_class_map.csv",
+  "latency_definition": "trigger_timestamp_ms - ground_truth_impulse_onset_ms (includes frame capture buffer read and post-impulse tail wait if enabled)",
+  "comparative_matrix": [
+    {
+      "configuration": "Baseline Classifier (Bang/Expl/Cap)",
+      "classifier_mode": "legacy",
+      "timing_mode": "baseline",
+      "resample_method": "box_filter",
+      "event_recall_pct": 100.0,
+      "threat_events_count": 6,
+      "true_positives": 6,
+      "false_negatives": 0,
+      "false_alerts_per_hour": 391.30434782608694,
+      "false_positives": 5,
+      "duplicate_alerts": 0,
+      "total_negative_hours": 0.012777777777777779,
+      "latency_p50_ms": 26.43990929716074,
+      "latency_p90_ms": 43.458049886678396,
+      "inference_failures": 0
+    },
+    {
+      "configuration": "Tightened Classifier (Gunshot Only)",
+      "classifier_mode": "tightened",
+      "timing_mode": "baseline",
+      "resample_method": "box_filter",
+      "event_recall_pct": 100.0,
+      "threat_events_count": 6,
+      "true_positives": 6,
+      "false_negatives": 0,
+      "false_alerts_per_hour": 313.04347826086956,
+      "false_positives": 4,
+      "duplicate_alerts": 0,
+      "total_negative_hours": 0.012777777777777779,
+      "latency_p50_ms": 26.43990929716074,
+      "latency_p90_ms": 43.458049886678396,
+      "inference_failures": 0
+    },
+    {
+      "configuration": "Tightened + Post-Impulse Tail Wait",
+      "classifier_mode": "tightened",
+      "timing_mode": "post_impulse_tail",
+      "resample_method": "box_filter",
+      "event_recall_pct": 100.0,
+      "threat_events_count": 6,
+      "true_positives": 6,
+      "false_negatives": 0,
+      "false_alerts_per_hour": 78.26086956521739,
+      "false_positives": 1,
+      "duplicate_alerts": 0,
+      "total_negative_hours": 0.012777777777777779,
+      "latency_p50_ms": 356.4115646259313,
+      "latency_p90_ms": 397.9591836735658,
+      "inference_failures": 0
+    },
+    {
+      "configuration": "Tightened + Tail Wait + Polyphase",
+      "classifier_mode": "tightened",
+      "timing_mode": "post_impulse_tail",
+      "resample_method": "polyphase",
+      "event_recall_pct": 83.33333333333334,
+      "threat_events_count": 6,
+      "true_positives": 5,
+      "false_negatives": 1,
+      "false_alerts_per_hour": 0.0,
+      "false_positives": 0,
+      "duplicate_alerts": 0,
+      "total_negative_hours": 0.012777777777777779,
+      "latency_p50_ms": 368.4353741496575,
+      "latency_p90_ms": 398.78004535155617,
+      "inference_failures": 0
+    }
+  ],
+  "hard_negatives_breakdown": {
+    "balloon_pop": {
+      "tested_events": 1,
+      "legacy_false_alerts": 1,
+      "tightened_baseline_false_alerts": 1
+    },
+    "door_slam": {
+      "tested_events": 2,
+      "legacy_false_alerts": 2,
+      "tightened_baseline_false_alerts": 1
+    },
+    "dropped_book": {
+      "tested_events": 1,
+      "legacy_false_alerts": 0,
+      "tightened_baseline_false_alerts": 0
+    },
+    "hand_clap": {
+      "tested_events": 2,
+      "legacy_false_alerts": 2,
+      "tightened_baseline_false_alerts": 2
+    },
+    "speech_shout": {
+      "tested_events": 1,
+      "legacy_false_alerts": 0,
+      "tightened_baseline_false_alerts": 0
+    }
+  }
+}
