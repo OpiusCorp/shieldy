@@ -1,4 +1,4 @@
-...............                                                          [100%]
+................                                                         [100%]
 =============================== warnings summary ===============================
 eval/test_scoring.py::test_one_to_one_alert_matching_overlapping_events
 eval/test_scoring.py::test_duplicate_alerts_policy
@@ -17,4 +17,4 @@ eval/test_inference.py::test_scheduler_sustained_impulses_timeout_bounded
     warnings.warn(_INTERPRETER_DELETION_WARNING)
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-15 passed, 9 warnings in 26.40s
+16 passed, 9 warnings in 3.26s
