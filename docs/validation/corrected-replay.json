@@ -1,0 +1,133 @@
+{
+  "benchmark_type": "synthetic_calibrated_identical_corpus",
+  "corpus_seed": 42,
+  "boundary_corpus_sha256": "ec7537d47005465800134564976ad2eb93f7f47cef6d897eb90087346a07ad56",
+  "hard_negatives_corpus_sha256": "3fb30f80bce382dce2cba6112b0cad5d3e02c4f038fc88494b5e29477458e4e8",
+  "provenance": {
+    "execution_kind": "python_simulator_with_real_tflite_inference",
+    "source_commit_sha": "a6b4d632b61c06cfa124529790302df1c1f22013",
+    "working_tree_dirty": false,
+    "source_file_sha256": {
+      "eval/__init__.py": "4321f5fd634471c7642f6c02499d4a88b10739f932176f3521f7540f01a8f6c7",
+      "eval/class_map.py": "beba6d48b1af1ce7878ef69c512a1fc6fe73251d22cda58a9f40cdfd624ea7ea",
+      "eval/classifier.py": "ce423f607ba35f070c4c0e64062908704ebda1d458bf410af945577061e9a8d4",
+      "eval/detector_pipeline.py": "579187adc4bdad4efab43b6a49f24e4e2448c21c17e7e654252ecf929fb914d2",
+      "eval/eval_harness.py": "3a1ef498ceeb32cc802d93e9f18453749ee17e583c6ea3ab83153d3089342218",
+      "eval/manifest.py": "4ed71478cbcd038b996fe0ae68cce378d9650e6ea29d77efada4872fb53f0132",
+      "eval/provenance.py": "f9b37f211ecabbabe21d6711ff808904d615ed9d2d16b2c6d9c5552e8c2b4c3a",
+      "eval/run_eval.py": "cf45cbdd04609b31dab5a764979fa54c6c2ed5ae4eb401bc0635e453f14890fa",
+      "eval/synthetic_audio.py": "6191cf8df06f2aa5b26d52f29879af7ae3ee560a1d6886e23b6d8a3c55f79852",
+      "eval/test_eval_harness.py": "5c1c83aec50d924bdff823027f8664e61b4e233d79e38917f47a773fda05f4fe",
+      "eval/test_inference.py": "21141852437af5364629a9052a0349444eb1e96e8895cddbdb3f3bdf39b468ad",
+      "eval/test_provenance.py": "986bfb9760153c2e11730d4bdb70d37daef37d5f925c86606b18ea7b2373a996",
+      "eval/test_scoring.py": "4c6eeda6911c9cf85d31cae47e2addb09197cd03ee9f10b42800321a4edad828",
+      "app/src/main/java/com/echoshield/echonode/service/AudioSensorService.kt": "8e5df7ee1c053c196fee707604c83c164fb167db83a941580acb2f15de37f66b",
+      "app/src/main/java/com/echoshield/echonode/service/DetectionScheduler.kt": "ff58f238c733e768343814e5fd9eb2dd6489866cd8e52f65683d8860a06ed7ad",
+      "app/src/main/java/com/echoshield/echonode/service/LegacyTfLiteGunshotClassifier.kt": "ff43e2e92264b145374fc040e612225ace86b84a6395bf4743f6e39228587d48",
+      "app/src/main/java/com/echoshield/echonode/service/RollingAudioBuffer.kt": "959628008a7ba32613eecad8f28c4a4474153a4a71533cb8bf7b997155dc40e5",
+      "app/src/main/java/com/echoshield/echonode/service/YamnetLabels.kt": "ebaf1bc26bec6c07de440b6d773109989e19000183ee3218ad618d4a859bb5a8"
+    },
+    "model_sha256": "e193da5676a2fdb7a3702c10fba62aa27d76f64e4534467443811c1a2ff1667d",
+    "android_runtime_executed_by_replay": false
+  },
+  "model_executed": "yamnet.tflite (unquantized float32, bundled in app/src/main/assets)",
+  "class_map_source": "app/src/main/assets/yamnet_class_map.csv",
+  "latency_definition": "trigger_timestamp_ms - ground_truth_impulse_onset_ms (includes frame capture buffer read and post-impulse tail wait if enabled)",
+  "comparative_matrix": [
+    {
+      "configuration": "Baseline Classifier (Bang/Expl/Cap)",
+      "classifier_mode": "legacy",
+      "timing_mode": "baseline",
+      "resample_method": "box_filter",
+      "event_recall_pct": 100.0,
+      "threat_events_count": 6,
+      "true_positives": 6,
+      "false_negatives": 0,
+      "false_alerts_per_hour": 391.30434782608694,
+      "false_positives": 5,
+      "duplicate_alerts": 0,
+      "total_negative_hours": 0.012777777777777779,
+      "latency_p50_ms": 26.43990929716074,
+      "latency_p90_ms": 43.458049886678396,
+      "inference_failures": 0
+    },
+    {
+      "configuration": "Tightened Classifier (Gunshot Only)",
+      "classifier_mode": "tightened",
+      "timing_mode": "baseline",
+      "resample_method": "box_filter",
+      "event_recall_pct": 100.0,
+      "threat_events_count": 6,
+      "true_positives": 6,
+      "false_negatives": 0,
+      "false_alerts_per_hour": 313.04347826086956,
+      "false_positives": 4,
+      "duplicate_alerts": 0,
+      "total_negative_hours": 0.012777777777777779,
+      "latency_p50_ms": 26.43990929716074,
+      "latency_p90_ms": 43.458049886678396,
+      "inference_failures": 0
+    },
+    {
+      "configuration": "Tightened + Post-Impulse Tail Wait",
+      "classifier_mode": "tightened",
+      "timing_mode": "post_impulse_tail",
+      "resample_method": "box_filter",
+      "event_recall_pct": 100.0,
+      "threat_events_count": 6,
+      "true_positives": 6,
+      "false_negatives": 0,
+      "false_alerts_per_hour": 78.26086956521739,
+      "false_positives": 1,
+      "duplicate_alerts": 0,
+      "total_negative_hours": 0.012777777777777779,
+      "latency_p50_ms": 356.4115646259313,
+      "latency_p90_ms": 397.9591836735658,
+      "inference_failures": 0
+    },
+    {
+      "configuration": "Tightened + Tail Wait + Polyphase",
+      "classifier_mode": "tightened",
+      "timing_mode": "post_impulse_tail",
+      "resample_method": "polyphase",
+      "event_recall_pct": 83.33333333333334,
+      "threat_events_count": 6,
+      "true_positives": 5,
+      "false_negatives": 1,
+      "false_alerts_per_hour": 0.0,
+      "false_positives": 0,
+      "duplicate_alerts": 0,
+      "total_negative_hours": 0.012777777777777779,
+      "latency_p50_ms": 368.4353741496575,
+      "latency_p90_ms": 398.78004535155617,
+      "inference_failures": 0
+    }
+  ],
+  "hard_negatives_breakdown": {
+    "balloon_pop": {
+      "tested_events": 1,
+      "legacy_false_alerts": 1,
+      "tightened_baseline_false_alerts": 1
+    },
+    "door_slam": {
+      "tested_events": 2,
+      "legacy_false_alerts": 2,
+      "tightened_baseline_false_alerts": 1
+    },
+    "dropped_book": {
+      "tested_events": 1,
+      "legacy_false_alerts": 0,
+      "tightened_baseline_false_alerts": 0
+    },
+    "hand_clap": {
+      "tested_events": 2,
+      "legacy_false_alerts": 2,
+      "tightened_baseline_false_alerts": 2
+    },
+    "speech_shout": {
+      "tested_events": 1,
+      "legacy_false_alerts": 0,
+      "tightened_baseline_false_alerts": 0
+    }
+  }
+}
