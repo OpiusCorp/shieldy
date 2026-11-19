@@ -1,4 +1,8 @@
-"""Master test suite importing both model-independent scoring and TensorFlow inference tests."""
+"""Master test documentation entrypoint.
 
-from eval.test_scoring import *
-from eval.test_inference import *
+To run model-independent scoring tests:
+    pytest eval/test_scoring.py
+
+To run TensorFlow Lite inference tests:
+    pytest eval/test_inference.py
+"""

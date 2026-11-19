@@ -180,6 +180,64 @@ def main():
             hn_rows.append([lbl, str(tot), f"{leg_fp} FPs", f"{tight_fp} FPs"])
 
         print(format_table(["Negative Sound Type", "Tested Events", "Legacy False Alerts", "Tightened False Alerts"], hn_rows))
+
+        if args.output:
+            matrix_data = []
+            for name, mode, timing, resample in configs:
+                classifier.set_mode(mode)
+                res = evaluate_pregenerated_corpus(
+                    classifier=classifier,
+                    classifier_mode=mode,
+                    timing_mode=timing,
+                    resample_method=resample,
+                    boundary_pcm=boundary_pcm,
+                    boundary_events=boundary_events,
+                    hn_pcm=hn_pcm,
+                    hn_events=hn_events,
+                )
+                b = res["boundary"]
+                hn = res["hard_negatives"]
+                matrix_data.append({
+                    "configuration": name,
+                    "classifier_mode": mode,
+                    "timing_mode": timing,
+                    "resample_method": resample,
+                    "event_recall_pct": b.event_recall_pct,
+                    "threat_events_count": b.threat_events_count,
+                    "true_positives": b.true_positives,
+                    "false_negatives": b.false_negatives,
+                    "false_alerts_per_hour": hn.false_alerts_per_hour,
+                    "false_positives": hn.false_positives,
+                    "duplicate_alerts": b.duplicate_alerts + hn.duplicate_alerts,
+                    "total_negative_hours": hn.total_negative_hours,
+                    "latency_p50_ms": b.latency_p50_ms,
+                    "latency_p90_ms": b.latency_p90_ms,
+                    "inference_failures": b.inference_failures + hn.inference_failures,
+                })
+
+            out_data = {
+                "benchmark_type": "synthetic_calibrated_identical_corpus",
+                "corpus_seed": 42,
+                "boundary_corpus_sha256": b_sha,
+                "hard_negatives_corpus_sha256": hn_sha,
+                "tested_detector_head_sha": "af6564b",
+                "model_executed": "yamnet.tflite (unquantized float32, bundled in app/src/main/assets)",
+                "class_map_source": "app/src/main/assets/yamnet_class_map.csv",
+                "latency_definition": "trigger_timestamp_ms - ground_truth_impulse_onset_ms (includes frame capture buffer read and post-impulse tail wait if enabled)",
+                "comparative_matrix": matrix_data,
+                "hard_negatives_breakdown": {
+                    lbl: {
+                        "tested_events": leg_hn.hard_negative_breakdown.get(lbl, {}).get("total_events", 0),
+                        "legacy_false_alerts": leg_hn.hard_negative_breakdown.get(lbl, {}).get("false_alerts", 0),
+                        "tightened_baseline_false_alerts": tight_hn.hard_negative_breakdown.get(lbl, {}).get("false_alerts", 0),
+                    }
+                    for lbl in sorted(all_labels)
+                },
+            }
+            with open(args.output, "w") as f:
+                json.dump(out_data, f, indent=2)
+            print(f"\nSaved comparative metrics to {args.output}")
+
         return
 
     # Single mode benchmark

@@ -86,8 +86,8 @@ python3 -m eval.run_eval --mode tightened --output eval/raw_benchmark_results.js
 |---|:---:|:---:|:---:|:---:|:---:|
 | **Baseline Classifier** (Bang/Explosion/Cap gun, immediate) | 100.0% (6/6) | 391.3 / hr | 5 FPs | 26.4 ms | 43.5 ms |
 | **Tightened Classifier** (Gunshots only `[421-424]`, immediate) | 100.0% (6/6) | 313.0 / hr | 4 FPs | 26.4 ms | 43.5 ms |
-| **Tightened + Post-Impulse Tail Wait** (PR #6 timing) | 100.0% (6/6) | **78.3 / hr** | **1 FP** | 322.1 ms | 342.5 ms |
-| **Tightened + Tail Wait + Polyphase Resampling** | 83.3% (5/6) | **78.3 / hr** | **1 FP** | 322.0 ms | 342.9 ms |
+| **Tightened + Post-Impulse Tail Wait** (PR #6 timing) | 100.0% (6/6) | **78.3 / hr** | **1 FP** | 356.4 ms | 398.0 ms |
+| **Tightened + Tail Wait + Polyphase Resampling** | 83.3% (5/6) | **0.0 / hr** | **0 FPs** | 368.4 ms | 398.8 ms |
 
 ### Hard Negative Breakdown by Event Type
 

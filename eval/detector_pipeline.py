@@ -81,6 +81,7 @@ class AudioDetectorPipeline:
 
         # Tail scheduling state (PR #6 bounded tail coverage)
         self.pending_tail_active = False
+        self.first_impulse_at_ms = 0.0
         self.tail_target_time_ms = 0.0
         self.tail_deadline_ms = 0.0
 
@@ -99,6 +100,7 @@ class AudioDetectorPipeline:
         self.last_trigger_time = -self.TRIGGER_COOLDOWN_MS
         self.last_model_inference = -self.MODEL_INFERENCE_INTERVAL_MS
         self.pending_tail_active = False
+        self.first_impulse_at_ms = 0.0
         self.tail_target_time_ms = 0.0
         self.tail_deadline_ms = 0.0
         self.alerts.clear()
@@ -114,6 +116,10 @@ class AudioDetectorPipeline:
         read_size = len(frame_pcm16)
         if read_size <= 0:
             return None
+
+        # Expire stale impulse memory (> IMPULSE_MEMORY_MS ago)
+        if self.last_impulse_at_ms > 0 and (current_time_ms - self.last_impulse_at_ms > self.IMPULSE_MEMORY_MS):
+            self.last_impulse_at_ms = 0.0
 
         # 1. Compute acoustic metrics
         samples_float = frame_pcm16.astype(np.float64)
@@ -138,13 +144,23 @@ class AudioDetectorPipeline:
         is_impulse_frame = peak_normalized >= self.IMPULSE_ONSET_PEAK_NORMALIZED or clipping_gate
         if is_impulse_frame:
             frame_start_ms = current_time_ms - (read_size * 1000.0 / self.SAMPLE_RATE)
-            self.last_impulse_at_ms = frame_start_ms + (peak_idx * 1000.0 / self.SAMPLE_RATE)
+            impulse_time = frame_start_ms + (peak_idx * 1000.0 / self.SAMPLE_RATE)
+            self.last_impulse_at_ms = impulse_time
 
-            if self.timing_mode == "post_impulse_tail" and not self.pending_tail_active:
-                # Prime bounded tail wait
-                self.pending_tail_active = True
-                self.tail_target_time_ms = self.last_impulse_at_ms + self.tail_wait_ms
-                self.tail_deadline_ms = self.last_impulse_at_ms + self.max_sustained_wait_ms
+            if self.timing_mode == "post_impulse_tail":
+                if not self.pending_tail_active:
+                    # Anchor timeout to the FIRST pending event
+                    self.pending_tail_active = True
+                    self.first_impulse_at_ms = impulse_time
+                    self.tail_target_time_ms = impulse_time + self.tail_wait_ms
+                    self.tail_deadline_ms = impulse_time + self.max_sustained_wait_ms
+                else:
+                    # Subsequent impulse in ongoing burst:
+                    # Target latest tail, but anchor timeout firmly to first event
+                    self.tail_target_time_ms = min(
+                        impulse_time + self.tail_wait_ms,
+                        self.tail_deadline_ms
+                    )
 
         # 4. Tier 1: EMA smoothing and Gate check
         self.smoothed_amplitude = (
@@ -195,7 +211,6 @@ class AudioDetectorPipeline:
                     target_window_end_ms = min(current_time_ms, self.tail_target_time_ms)
                     self.pending_tail_active = False
             elif gate_open and cadence_allowed:
-                # Gate open on sustained sound without distinct impulse onset
                 should_run_model = True
                 target_window_end_ms = current_time_ms
         else:
@@ -262,6 +277,37 @@ class AudioDetectorPipeline:
 
         return None
 
+    def handle_peer_wake_request(
+        self,
+        event_timestamp_ms: float,
+        current_time_ms: float,
+        tail_ms: float = 300.0,
+    ) -> Tuple[str, Optional[float]]:
+        """
+        Handle peer wake classification request:
+        Returns: (status, classification_time_ms)
+        status:
+          - "READY": tail already buffered, can classify immediately
+          - "PENDING_TAIL": event is valid but tail is still arriving; schedule classification at event_timestamp_ms + tail_ms
+          - "REJECTED_EXPIRED": event is older than buffer history (>4s ago)
+          - "REJECTED_FUTURE": event timestamp is in the future relative to current time
+        """
+        if event_timestamp_ms > current_time_ms:
+            return ("REJECTED_FUTURE", None)
+
+        age_ms = current_time_ms - event_timestamp_ms
+        max_retained_ms = (self.HISTORY_SAMPLES / self.MODEL_SAMPLE_RATE) * 1000.0
+        if age_ms > max_retained_ms:
+            return ("REJECTED_EXPIRED", None)
+
+        needed_end_ms = event_timestamp_ms + tail_ms
+        if current_time_ms < needed_end_ms:
+            # Early peer request arriving before tail finishes buffering!
+            # Latch pending tail wait rather than immediately voting NO
+            return ("PENDING_TAIL", needed_end_ms)
+
+        return ("READY", current_time_ms)
+
     def classify_wake_historical(
         self,
         event_timestamp_ms: float,
@@ -274,14 +320,11 @@ class AudioDetectorPipeline:
         - Rejects future timestamps (event_timestamp_ms > current_time_ms).
         - Rejects expired history (event_timestamp_ms older than retained ring buffer).
         """
-        if event_timestamp_ms > current_time_ms:
-            return None  # Future timestamp error
+        status, sched_time = self.handle_peer_wake_request(event_timestamp_ms, current_time_ms, tail_ms)
+        if status in ("REJECTED_FUTURE", "REJECTED_EXPIRED"):
+            return None
 
-        age_ms = current_time_ms - event_timestamp_ms
-        max_retained_ms = (self.HISTORY_SAMPLES / self.MODEL_SAMPLE_RATE) * 1000.0
-        if age_ms > max_retained_ms:
-            return None  # Expired history
-
+        # If tail is still arriving, clamp to current_time_ms only if scheduled time reached
         target_window_end = min(current_time_ms, event_timestamp_ms + tail_ms)
         model_input = self._snapshot_history_at(target_window_end)
         if model_input is None:

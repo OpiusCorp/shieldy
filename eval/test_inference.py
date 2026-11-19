@@ -1,6 +1,7 @@
 """TensorFlow-dependent unit tests verifying TFLite model contract, gating, and tail scheduling."""
 
 import os
+import math
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
@@ -112,3 +113,69 @@ def test_post_impulse_tail_scheduling():
     assert metrics.false_negatives == 0
     # Latency should reflect the tail wait (~300ms + frame buffer read)
     assert metrics.latency_p50_ms >= 200.0
+
+
+def test_scheduler_impulse_then_silence_latches_inference():
+    """Verify that a brief 5ms impulse latches pending tail wait even after gate closes."""
+    pipeline = AudioDetectorPipeline(
+        classifier_mode="tightened",
+        timing_mode="post_impulse_tail",
+        tail_wait_ms=300.0,
+    )
+
+    # Pre-fill history buffer with 1.0s of quiet audio
+    quiet_frame = np.zeros(2048, dtype=np.int16)
+    for i in range(25):
+        pipeline.process_frame(quiet_frame, 100.0 + (i * 46.4))
+
+    # Brief impulsive spike in one frame at t=1500ms
+    impulse_frame = np.copy(quiet_frame)
+    impulse_frame[10:30] = 28000
+    alert_during_impulse = pipeline.process_frame(impulse_frame, 1500.0)
+
+    # Inference should NOT run immediately; pending_tail_active should be latched
+    assert alert_during_impulse is None
+    assert pipeline.pending_tail_active is True
+    assert math.isclose(pipeline.tail_target_time_ms, pipeline.first_impulse_at_ms + 300.0, rel_tol=1e-5)
+
+    # Following frames are completely silent (gate closes)
+    pipeline.process_frame(quiet_frame, 1550.0)
+    assert pipeline.current_gate_open is False  # Gate closed!
+    assert pipeline.pending_tail_active is True  # Latched through gate closure!
+
+    pipeline.process_frame(quiet_frame, 1650.0)
+    assert pipeline.pending_tail_active is True
+
+    # Advance to t=1850ms (> 1800ms tail target)
+    alert_after_tail = pipeline.process_frame(quiet_frame, 1850.0)
+    # Latch was serviced!
+    assert pipeline.pending_tail_active is False
+
+
+def test_scheduler_sustained_impulses_timeout_bounded():
+    """Verify that sustained impulses do not push timeout deadline indefinitely."""
+    pipeline = AudioDetectorPipeline(
+        classifier_mode="tightened",
+        timing_mode="post_impulse_tail",
+        tail_wait_ms=300.0,
+        max_sustained_wait_ms=600.0,
+    )
+
+    quiet_frame = np.zeros(2048, dtype=np.int16)
+    for i in range(25):
+        pipeline.process_frame(quiet_frame, 100.0 + (i * 46.4))
+
+    # First impulse at t=2000ms
+    impulse_frame = np.copy(quiet_frame)
+    impulse_frame[10:30] = 28000
+    pipeline.process_frame(impulse_frame, 2000.0)
+
+    initial_deadline = pipeline.tail_deadline_ms
+    assert math.isclose(initial_deadline, pipeline.first_impulse_at_ms + 600.0, rel_tol=1e-5)
+
+    # 10 continuous subsequent impulses every 40ms
+    for step in range(1, 10):
+        t = 2000.0 + (step * 40.0)
+        pipeline.process_frame(impulse_frame, t)
+        # Deadline MUST remain anchored to first impulse (2600ms)
+        assert pipeline.tail_deadline_ms == initial_deadline

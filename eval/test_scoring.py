@@ -163,6 +163,68 @@ def test_wake_historical_rejection_rules():
     assert pipeline.classify_wake_historical(event_timestamp_ms=1000.0, current_time_ms=6000.0) is None
 
 
+def test_scheduler_early_peer_wake_request():
+    """Verify early peer request returning PENDING_TAIL rather than voting NO."""
+    pipeline = AudioDetectorPipeline.__new__(AudioDetectorPipeline)
+    pipeline.SAMPLE_RATE = 44100
+    pipeline.MODEL_SAMPLE_RATE = 16000
+    pipeline.HISTORY_SAMPLES = 64000
+
+    # Event at t=1000ms, peer request arrives early at t=1100ms, tail wait=300ms (needs t=1300ms)
+    status, sched_time = pipeline.handle_peer_wake_request(
+        event_timestamp_ms=1000.0, current_time_ms=1100.0, tail_ms=300.0
+    )
+    assert status == "PENDING_TAIL"
+    assert sched_time == 1300.0
+
+    # At t=1300ms, status transitions to READY
+    status_ready, ready_time = pipeline.handle_peer_wake_request(
+        event_timestamp_ms=1000.0, current_time_ms=1300.0, tail_ms=300.0
+    )
+    assert status_ready == "READY"
+    assert ready_time == 1300.0
+
+
+def test_scheduler_stale_impulse_expiration():
+    """Verify stale impulse memory is cleared when elapsed time exceeds IMPULSE_MEMORY_MS."""
+    pipeline = AudioDetectorPipeline.__new__(AudioDetectorPipeline)
+    pipeline.SAMPLE_RATE = 44100
+    pipeline.MODEL_SAMPLE_RATE = 16000
+    pipeline.HISTORY_SAMPLES = 64000
+    pipeline.history_buffer = np.zeros(64000, dtype=np.float32)
+    pipeline.history_write_index = 0
+    pipeline.history_samples_written = 64000
+    pipeline.history_end_time_ms = 0.0
+    pipeline.resample_method = "box_filter"
+    pipeline.IMPULSE_MEMORY_MS = 3000.0
+    pipeline.IMPULSE_ONSET_PEAK_NORMALIZED = 0.15
+    pipeline.CLIP_MARGIN = 64
+    pipeline.CLIP_FRACTION_GATE = 0.005
+    pipeline.CLIP_FRACTION_SEVERE = 0.02
+    pipeline.detection_threshold = 200.0
+    pipeline.EMA_ALPHA = 0.4
+    pipeline.smoothed_amplitude = 0.0
+    pipeline.timing_mode = "baseline"
+    pipeline.TRIGGER_COOLDOWN_MS = 5000.0
+    pipeline.MODEL_INFERENCE_INTERVAL_MS = 400.0
+    pipeline.last_trigger_time = -5000.0
+    pipeline.last_model_inference = -400.0
+    pipeline.pending_tail_active = False
+    pipeline.classifier = None
+    pipeline.MODEL_INPUT_SAMPLES = 15600
+    pipeline.IMPULSIVE_PEAK_RMS_RATIO = 3.0
+
+    # Stale impulse at 1000ms
+    pipeline.last_impulse_at_ms = 1000.0
+
+    # Quiet frame arrives at 5000ms (> 3000ms later)
+    quiet_frame = np.zeros(2048, dtype=np.int16)
+    pipeline.process_frame(quiet_frame, 5000.0)
+
+    # Stale impulse must be cleared
+    assert pipeline.last_impulse_at_ms == 0.0
+
+
 def test_manifest_roundtrip(tmp_path):
     manifest_path = str(tmp_path / "test_manifest.json")
     evt = GroundTruthEvent(
