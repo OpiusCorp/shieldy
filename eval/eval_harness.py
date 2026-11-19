@@ -20,6 +20,7 @@ class MetricSummary:
     true_positives: int
     false_negatives: int
     false_positives: int
+    duplicate_alerts: int
     event_recall_pct: float
     false_alerts_per_hour: float
     latency_mean_ms: float
@@ -27,6 +28,7 @@ class MetricSummary:
     latency_p90_ms: float
     latency_min_ms: float
     latency_max_ms: float
+    inference_failures: int = 0
     boundary_metrics: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     hard_negative_breakdown: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     alerts: List[Dict[str, Any]] = field(default_factory=list)
@@ -72,35 +74,39 @@ class EvaluationHarness:
 
             curr_sample = end_sample
 
-        return self._score_results(total_duration_sec, ground_truth_events, all_alerts)
+        return self._score_results(
+            total_duration_sec,
+            ground_truth_events,
+            all_alerts,
+            inference_failures=self.pipeline.inference_failure_count,
+        )
 
     def _score_results(
         self,
         total_duration_sec: float,
         gt_events: List[GroundTruthEvent],
         alerts: List[DetectionAlert],
+        inference_failures: int = 0,
     ) -> MetricSummary:
         threat_events = [e for e in gt_events if e.is_threat]
         non_threat_events = [e for e in gt_events if not e.is_threat]
 
         tp = 0
         fn = 0
-        latencies = []
-        matched_alert_indices = set()
+        duplicate_alerts_count = 0
+        latencies: List[float] = []
 
-        # Score threat events
+        # Strict one-to-one event matching:
+        # Each alert can match at most ONE threat event.
+        # Each threat event can be claimed by at most ONE primary alert.
+        claimed_alert_indices = set()
+        event_matched_alerts = {}
+
         boundary_stats: Dict[str, Dict[str, Any]] = {}
 
         for evt in threat_events:
             start_ms = evt.start_sec * 1000.0
             end_ms = (evt.end_sec * 1000.0) + self.max_latency_allowance_ms
-
-            # Find matching alerts
-            matching = [
-                (idx, a)
-                for idx, a in enumerate(alerts)
-                if start_ms <= a.timestamp_ms <= end_ms
-            ]
 
             b_key = (
                 f"{evt.boundary_offset_ms:.0f}ms"
@@ -111,21 +117,35 @@ class EvaluationHarness:
                 boundary_stats[b_key] = {"total": 0, "detected": 0, "latencies": []}
             boundary_stats[b_key]["total"] += 1
 
-            if matching:
+            # Candidate alerts in window that have not been claimed by a prior event
+            unclaimed_in_window = [
+                (idx, a)
+                for idx, a in enumerate(alerts)
+                if idx not in claimed_alert_indices and start_ms <= a.timestamp_ms <= end_ms
+            ]
+
+            if unclaimed_in_window:
                 tp += 1
-                first_idx, first_alert = matching[0]
-                matched_alert_indices.add(first_idx)
+                first_idx, first_alert = unclaimed_in_window[0]
+                claimed_alert_indices.add(first_idx)
+                event_matched_alerts[evt.event_id] = first_idx
+
                 latency = max(0.0, first_alert.timestamp_ms - start_ms)
                 latencies.append(latency)
 
                 boundary_stats[b_key]["detected"] += 1
                 boundary_stats[b_key]["latencies"].append(latency)
+
+                # Subsequent alerts falling within the same event window are duplicate alerts
+                for dup_idx, _ in unclaimed_in_window[1:]:
+                    claimed_alert_indices.add(dup_idx)
+                    duplicate_alerts_count += 1
             else:
                 fn += 1
 
-        # Calculate False Positives (alerts not matched to any threat event)
+        # False Positives: alerts that did not match any threat event window
         fp_alerts = [
-            a for idx, a in enumerate(alerts) if idx not in matched_alert_indices
+            a for idx, a in enumerate(alerts) if idx not in claimed_alert_indices
         ]
         fp = len(fp_alerts)
 
@@ -143,14 +163,18 @@ class EvaluationHarness:
                 if s_ms <= fa.timestamp_ms <= e_ms:
                     hn_breakdown[lbl]["false_alerts"] += 1
 
-        # Calculate time metrics
+        # Calculate duration metrics
         threat_duration_sec = sum(
             max(0.0, e.end_sec - e.start_sec) for e in threat_events
         )
         negative_duration_sec = max(1.0, total_duration_sec - threat_duration_sec)
         negative_hours = negative_duration_sec / 3600.0
 
-        recall_pct = (tp / max(1, (tp + fn))) * 100.0 if (tp + fn) > 0 else 0.0
+        if len(threat_events) > 0:
+            recall_pct = (tp / float(len(threat_events))) * 100.0
+        else:
+            recall_pct = 100.0  # vacuously 100% when no threats exist
+
         false_alerts_per_hr = fp / negative_hours
 
         # Latency statistics
@@ -163,7 +187,6 @@ class EvaluationHarness:
         else:
             lat_mean = lat_p50 = lat_p90 = lat_min = lat_max = 0.0
 
-        # Boundary summary
         boundary_summary = {}
         for k, v in boundary_stats.items():
             tot = v["total"]
@@ -183,6 +206,7 @@ class EvaluationHarness:
             true_positives=tp,
             false_negatives=fn,
             false_positives=fp,
+            duplicate_alerts=duplicate_alerts_count,
             event_recall_pct=recall_pct,
             false_alerts_per_hour=false_alerts_per_hr,
             latency_mean_ms=lat_mean,
@@ -190,6 +214,7 @@ class EvaluationHarness:
             latency_p90_ms=lat_p90,
             latency_min_ms=lat_min,
             latency_max_ms=lat_max,
+            inference_failures=inference_failures,
             boundary_metrics=boundary_summary,
             hard_negative_breakdown=hn_breakdown,
             alerts=[

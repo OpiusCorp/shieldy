@@ -51,3 +51,4 @@ server/node_modules/
 # Evaluation artifacts
 eval_test.txt
 .pytest_cache/
+__pycache__/

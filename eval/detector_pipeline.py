@@ -54,13 +54,17 @@ class AudioDetectorPipeline:
         detection_threshold: float = 200.0,
         classifier_mode: str = "tightened",
         resample_method: str = "box_filter",
-        window_strategy: str = "latest",  # "latest" (sentinel default) or "retrospective"
+        timing_mode: str = "baseline",  # "baseline" (immediate on current frame) or "post_impulse_tail" (PR #6)
+        tail_wait_ms: float = 300.0,
+        max_sustained_wait_ms: float = 600.0,
     ):
         self.classifier = classifier or YamnetClassifier(mode=classifier_mode)
         self.classifier_mode = classifier_mode
         self.detection_threshold = detection_threshold
         self.resample_method = resample_method
-        self.window_strategy = window_strategy
+        self.timing_mode = timing_mode
+        self.tail_wait_ms = tail_wait_ms
+        self.max_sustained_wait_ms = max_sustained_wait_ms
 
         # Detector internal state
         self.history_buffer = np.zeros(self.HISTORY_SAMPLES, dtype=np.float32)
@@ -75,7 +79,13 @@ class AudioDetectorPipeline:
         self.last_trigger_time = -self.TRIGGER_COOLDOWN_MS
         self.last_model_inference = -self.MODEL_INFERENCE_INTERVAL_MS
 
+        # Tail scheduling state (PR #6 bounded tail coverage)
+        self.pending_tail_active = False
+        self.tail_target_time_ms = 0.0
+        self.tail_deadline_ms = 0.0
+
         self.alerts: List[DetectionAlert] = []
+        self.inference_failure_count = 0
 
     def reset(self):
         self.history_buffer.fill(0.0)
@@ -88,7 +98,11 @@ class AudioDetectorPipeline:
         self.current_gate_open = False
         self.last_trigger_time = -self.TRIGGER_COOLDOWN_MS
         self.last_model_inference = -self.MODEL_INFERENCE_INTERVAL_MS
+        self.pending_tail_active = False
+        self.tail_target_time_ms = 0.0
+        self.tail_deadline_ms = 0.0
         self.alerts.clear()
+        self.inference_failure_count = 0
 
     def process_frame(
         self, frame_pcm16: np.ndarray, current_time_ms: float
@@ -121,9 +135,16 @@ class AudioDetectorPipeline:
         self._append_history(frame_pcm16, current_time_ms)
 
         # 3. Timestamp impulse onset
-        if peak_normalized >= self.IMPULSE_ONSET_PEAK_NORMALIZED or clipping_gate:
+        is_impulse_frame = peak_normalized >= self.IMPULSE_ONSET_PEAK_NORMALIZED or clipping_gate
+        if is_impulse_frame:
             frame_start_ms = current_time_ms - (read_size * 1000.0 / self.SAMPLE_RATE)
             self.last_impulse_at_ms = frame_start_ms + (peak_idx * 1000.0 / self.SAMPLE_RATE)
+
+            if self.timing_mode == "post_impulse_tail" and not self.pending_tail_active:
+                # Prime bounded tail wait
+                self.pending_tail_active = True
+                self.tail_target_time_ms = self.last_impulse_at_ms + self.tail_wait_ms
+                self.tail_deadline_ms = self.last_impulse_at_ms + self.max_sustained_wait_ms
 
         # 4. Tier 1: EMA smoothing and Gate check
         self.smoothed_amplitude = (
@@ -152,39 +173,50 @@ class AudioDetectorPipeline:
             elif clipping_gate:
                 gate_reason = "CLIP"
 
-        if not gate_open:
+        if not gate_open and not self.pending_tail_active:
             self.consecutive_high_confidence = 0
 
         self.current_gate_open = gate_open
 
-        # 5. Tier 2: Model inference rate check
+        # 5. Determine whether to run Tier 2 ML inference
         cooldown_remaining = max(0.0, self.TRIGGER_COOLDOWN_MS - (current_time_ms - self.last_trigger_time))
-        should_run_model = (
-            gate_open
-            and (current_time_ms - self.last_model_inference >= self.MODEL_INFERENCE_INTERVAL_MS)
-        )
+        cadence_allowed = (current_time_ms - self.last_model_inference) >= self.MODEL_INFERENCE_INTERVAL_MS
+
+        should_run_model = False
+        target_window_end_ms = current_time_ms
+
+        if self.timing_mode == "post_impulse_tail":
+            # PR #6 explicit sample-availability scheduling:
+            if self.pending_tail_active:
+                tail_arrived = current_time_ms >= self.tail_target_time_ms
+                timed_out = current_time_ms >= self.tail_deadline_ms
+                if (tail_arrived or timed_out) and cadence_allowed:
+                    should_run_model = True
+                    target_window_end_ms = min(current_time_ms, self.tail_target_time_ms)
+                    self.pending_tail_active = False
+            elif gate_open and cadence_allowed:
+                # Gate open on sustained sound without distinct impulse onset
+                should_run_model = True
+                target_window_end_ms = current_time_ms
+        else:
+            # Baseline simulation: immediate execution on gate open when cadence allows
+            if gate_open and cadence_allowed:
+                should_run_model = True
+                target_window_end_ms = current_time_ms
 
         if not should_run_model:
             return None
 
         self.last_model_inference = current_time_ms
 
-        # Select window to classify
-        if self.window_strategy == "retrospective":
-            now = current_time_ms
-            impulse_at = self.last_impulse_at_ms
-            heard_impulse = (impulse_at > 0.0) and (now - impulse_at <= self.IMPULSE_MEMORY_MS)
-            window_end = (impulse_at + self.WINDOW_TAIL_MS) if heard_impulse else now
-            model_input = self._snapshot_history_at(window_end)
-        else:
-            # Latest window ending now (Android sentinel default)
-            model_input = self._snapshot_history_at(current_time_ms)
-
+        model_input = self._snapshot_history_at(target_window_end_ms)
         if model_input is None:
+            self.inference_failure_count += 1
             return None
 
         result = self.classifier.classify(model_input)
         if result is None:
+            self.inference_failure_count += 1
             return None
 
         effective_threshold = (
@@ -229,6 +261,33 @@ class AudioDetectorPipeline:
             return alert
 
         return None
+
+    def classify_wake_historical(
+        self,
+        event_timestamp_ms: float,
+        current_time_ms: float,
+        tail_ms: float = 300.0,
+    ) -> Optional[ClassificationResult]:
+        """
+        Classify historical pre-roll audio upon receiving peer WAKE_CLASSIFY.
+        Enforces validation:
+        - Rejects future timestamps (event_timestamp_ms > current_time_ms).
+        - Rejects expired history (event_timestamp_ms older than retained ring buffer).
+        """
+        if event_timestamp_ms > current_time_ms:
+            return None  # Future timestamp error
+
+        age_ms = current_time_ms - event_timestamp_ms
+        max_retained_ms = (self.HISTORY_SAMPLES / self.MODEL_SAMPLE_RATE) * 1000.0
+        if age_ms > max_retained_ms:
+            return None  # Expired history
+
+        target_window_end = min(current_time_ms, event_timestamp_ms + tail_ms)
+        model_input = self._snapshot_history_at(target_window_end)
+        if model_input is None:
+            return None
+
+        return self.classifier.classify(model_input)
 
     def _append_history(self, source: np.ndarray, frame_end_time_ms: float):
         """Resample 44.1 kHz to 16.0 kHz and write into ring buffer."""

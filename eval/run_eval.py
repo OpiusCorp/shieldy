@@ -8,11 +8,12 @@ import argparse
 import json
 import sys
 from typing import Dict, Any
+import numpy as np
 
 from eval.classifier import YamnetClassifier
 from eval.class_map import YamnetClassMap
 from eval.detector_pipeline import AudioDetectorPipeline
-from eval.synthetic_audio import SyntheticAudioGenerator
+from eval.synthetic_audio import SyntheticAudioGenerator, compute_audio_sha256
 from eval.eval_harness import EvaluationHarness, MetricSummary
 from eval.manifest import EvaluationManifest
 
@@ -36,27 +37,28 @@ def format_table(header: list, rows: list) -> str:
     return "\n".join(lines)
 
 
-def run_benchmark(
-    generator: SyntheticAudioGenerator,
+def evaluate_pregenerated_corpus(
     classifier: YamnetClassifier,
     classifier_mode: str,
-    window_strategy: str = "latest",
-    resample_method: str = "box_filter",
+    timing_mode: str,
+    resample_method: str,
+    boundary_pcm: np.ndarray,
+    boundary_events: list,
+    hn_pcm: np.ndarray,
+    hn_events: list,
 ) -> Dict[str, MetricSummary]:
     pipeline = AudioDetectorPipeline(
         classifier=classifier,
         classifier_mode=classifier_mode,
-        window_strategy=window_strategy,
+        timing_mode=timing_mode,
         resample_method=resample_method,
     )
     harness = EvaluationHarness(pipeline=pipeline)
 
-    # 1. Boundary Suite
-    boundary_pcm, boundary_events = generator.generate_boundary_evaluation_suite()
+    # 1. Boundary Suite Replay
     boundary_metrics = harness.evaluate_stream(boundary_pcm, boundary_events)
 
-    # 2. Hard Negatives Suite
-    hn_pcm, hn_events = generator.generate_hard_negatives_suite()
+    # 2. Hard Negatives Suite Replay
     hn_metrics = harness.evaluate_stream(hn_pcm, hn_events)
 
     return {"boundary": boundary_metrics, "hard_negatives": hn_metrics}
@@ -85,7 +87,17 @@ def main():
 
     class_map = YamnetClassMap()
     classifier = YamnetClassifier(class_map=class_map, mode=args.mode)
-    generator = SyntheticAudioGenerator()
+    generator = SyntheticAudioGenerator(seed=42)
+
+    # Pre-generate corpus ONCE so all configurations replay identical inputs
+    print("[Corpus Generation] Generating deterministic test corpus (seed=42)...")
+    boundary_pcm, boundary_events = generator.generate_boundary_evaluation_suite()
+    hn_pcm, hn_events = generator.generate_hard_negatives_suite()
+
+    b_sha = compute_audio_sha256(boundary_pcm)
+    hn_sha = compute_audio_sha256(hn_pcm)
+    print(f"-> Boundary Suite: {len(boundary_pcm)/44100:.1f}s, SHA256: {b_sha[:16]}...")
+    print(f"-> Hard Negatives: {len(hn_pcm)/44100:.1f}s, SHA256: {hn_sha[:16]}...")
 
     if args.manifest:
         print(f"\n[Manifest Evaluation] Loading manifest: {args.manifest}")
@@ -103,23 +115,26 @@ def main():
         return
 
     if args.compare:
-        print("\n--- COMPARATIVE EVALUATION MATRIX ---")
+        print("\n--- COMPARATIVE EVALUATION MATRIX (IDENTICAL CORPUS REPLAY) ---")
         configs = [
-            ("Legacy Classifier (Bang/Expl/Cap)", "legacy", "latest", "box_filter"),
-            ("Tightened Classifier (Gunshot Only)", "tightened", "latest", "box_filter"),
-            ("Tightened + Retrospective Window", "tightened", "retrospective", "box_filter"),
-            ("Tightened + Retrospective + Polyphase", "tightened", "retrospective", "polyphase"),
+            ("Baseline Classifier (Bang/Expl/Cap)", "legacy", "baseline", "box_filter"),
+            ("Tightened Classifier (Gunshot Only)", "tightened", "baseline", "box_filter"),
+            ("Tightened + Post-Impulse Tail Wait", "tightened", "post_impulse_tail", "box_filter"),
+            ("Tightened + Tail Wait + Polyphase", "tightened", "post_impulse_tail", "polyphase"),
         ]
 
         summary_rows = []
-        for name, mode, win, resample in configs:
+        for name, mode, timing, resample in configs:
             classifier.set_mode(mode)
-            results = run_benchmark(
-                generator,
-                classifier,
+            results = evaluate_pregenerated_corpus(
+                classifier=classifier,
                 classifier_mode=mode,
-                window_strategy=win,
+                timing_mode=timing,
                 resample_method=resample,
+                boundary_pcm=boundary_pcm,
+                boundary_events=boundary_events,
+                hn_pcm=hn_pcm,
+                hn_events=hn_events,
             )
             b_m = results["boundary"]
             hn_m = results["hard_negatives"]
@@ -148,9 +163,13 @@ def main():
         # Print Hard Negative Breakdown for Legacy vs Tightened
         print("\n--- HARD NEGATIVES FALSE ALERT BREAKDOWN ---")
         classifier.set_mode("legacy")
-        leg_hn = run_benchmark(generator, classifier, "legacy")["hard_negatives"]
+        leg_hn = evaluate_pregenerated_corpus(
+            classifier, "legacy", "baseline", "box_filter", boundary_pcm, boundary_events, hn_pcm, hn_events
+        )["hard_negatives"]
         classifier.set_mode("tightened")
-        tight_hn = run_benchmark(generator, classifier, "tightened")["hard_negatives"]
+        tight_hn = evaluate_pregenerated_corpus(
+            classifier, "tightened", "baseline", "box_filter", boundary_pcm, boundary_events, hn_pcm, hn_events
+        )["hard_negatives"]
 
         hn_rows = []
         all_labels = set(leg_hn.hard_negative_breakdown.keys()) | set(tight_hn.hard_negative_breakdown.keys())
@@ -165,7 +184,16 @@ def main():
 
     # Single mode benchmark
     print(f"\n[Single Benchmark] Running mode={args.mode}...")
-    results = run_benchmark(generator, classifier, classifier_mode=args.mode)
+    results = evaluate_pregenerated_corpus(
+        classifier=classifier,
+        classifier_mode=args.mode,
+        timing_mode="baseline",
+        resample_method="box_filter",
+        boundary_pcm=boundary_pcm,
+        boundary_events=boundary_events,
+        hn_pcm=hn_pcm,
+        hn_events=hn_events,
+    )
     b_m = results["boundary"]
     hn_m = results["hard_negatives"]
 
