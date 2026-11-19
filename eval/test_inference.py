@@ -158,7 +158,7 @@ def test_scheduler_sustained_impulses_timeout_bounded():
         classifier_mode="tightened",
         timing_mode="post_impulse_tail",
         tail_wait_ms=300.0,
-        max_sustained_wait_ms=600.0,
+        max_sustained_wait_ms=450.0,
     )
 
     quiet_frame = np.zeros(2048, dtype=np.int16)
@@ -171,7 +171,7 @@ def test_scheduler_sustained_impulses_timeout_bounded():
     pipeline.process_frame(impulse_frame, 2000.0)
 
     initial_deadline = pipeline.tail_deadline_ms
-    assert math.isclose(initial_deadline, pipeline.first_impulse_at_ms + 600.0, rel_tol=1e-5)
+    assert math.isclose(initial_deadline, pipeline.first_impulse_at_ms + 450.0, rel_tol=1e-5)
 
     # 10 continuous subsequent impulses every 40ms
     for step in range(1, 10):

@@ -56,7 +56,7 @@ class AudioDetectorPipeline:
         resample_method: str = "box_filter",
         timing_mode: str = "baseline",  # "baseline" (immediate on current frame) or "post_impulse_tail" (PR #6)
         tail_wait_ms: float = 300.0,
-        max_sustained_wait_ms: float = 600.0,
+        max_sustained_wait_ms: float = 450.0,
     ):
         self.classifier = classifier or YamnetClassifier(mode=classifier_mode)
         self.classifier_mode = classifier_mode

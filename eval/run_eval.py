@@ -16,6 +16,7 @@ from eval.detector_pipeline import AudioDetectorPipeline
 from eval.synthetic_audio import SyntheticAudioGenerator, compute_audio_sha256
 from eval.eval_harness import EvaluationHarness, MetricSummary
 from eval.manifest import EvaluationManifest
+from eval.provenance import source_provenance
 
 
 def format_table(header: list, rows: list) -> str:
@@ -220,7 +221,7 @@ def main():
                 "corpus_seed": 42,
                 "boundary_corpus_sha256": b_sha,
                 "hard_negatives_corpus_sha256": hn_sha,
-                "tested_detector_head_sha": "af6564b",
+                "provenance": source_provenance(),
                 "model_executed": "yamnet.tflite (unquantized float32, bundled in app/src/main/assets)",
                 "class_map_source": "app/src/main/assets/yamnet_class_map.csv",
                 "latency_definition": "trigger_timestamp_ms - ground_truth_impulse_onset_ms (includes frame capture buffer read and post-impulse tail wait if enabled)",
