@@ -1,0 +1,55 @@
+{
+  "integration_base_sha": "f36f9d6e04d3da3fc08c830a149fd428eae7f064",
+  "source_prs": {
+    "5": "acae376",
+    "6": "f2a67d2",
+    "7": "642c714"
+  },
+  "android_unit_suites": [
+    {
+      "name": "com.echoshield.echonode.service.RollingAudioBufferTest",
+      "tests": "14",
+      "failures": "0",
+      "errors": "0",
+      "skipped": "0",
+      "time": "0.064"
+    },
+    {
+      "name": "com.echoshield.echonode.service.YamnetLabelsTest",
+      "tests": "2",
+      "failures": "0",
+      "errors": "0",
+      "skipped": "0",
+      "time": "0.013"
+    }
+  ],
+  "android_api34_instrumentation": [
+    {
+      "name": "com.echoshield.echonode.service.BundledClassifierIntegrationTest",
+      "tests": "2",
+      "failures": "0",
+      "errors": "0",
+      "skipped": "0",
+      "time": "0.688"
+    }
+  ],
+  "python_tests": {
+    "passed": 15,
+    "failed": 0,
+    "duration_seconds": 26.4
+  },
+  "server_tests": {
+    "passed": 32,
+    "failed": 0
+  },
+  "npm_audit_after_compatible_lockfile_fix": {
+    "vulnerabilities": 0
+  },
+  "model_sha256": "e193da5676a2fdb7a3702c10fba62aa27d76f64e4534467443811c1a2ff1667d",
+  "limits": [
+    "Emulator tests do not verify physical microphones or Nearby/Bluetooth",
+    "Python replay is a separate simulator with a known 600ms vs 450ms timeout mismatch",
+    "Original replay output hardcodes an obsolete source SHA",
+    "No field-recording accuracy evaluation or production deployment performed"
+  ]
+}
