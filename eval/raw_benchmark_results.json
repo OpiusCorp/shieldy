@@ -3,7 +3,7 @@
   "corpus_seed": 42,
   "boundary_corpus_sha256": "ec7537d47005465800134564976ad2eb93f7f47cef6d897eb90087346a07ad56",
   "hard_negatives_corpus_sha256": "3fb30f80bce382dce2cba6112b0cad5d3e02c4f038fc88494b5e29477458e4e8",
-  "tested_detector_head_sha": "af6564b",
+  "tested_detector_head_sha": "7e25708",
   "model_executed": "yamnet.tflite (unquantized float32, bundled in app/src/main/assets)",
   "class_map_source": "app/src/main/assets/yamnet_class_map.csv",
   "latency_definition": "trigger_timestamp_ms - ground_truth_impulse_onset_ms (includes frame capture buffer read and post-impulse tail wait if enabled)",

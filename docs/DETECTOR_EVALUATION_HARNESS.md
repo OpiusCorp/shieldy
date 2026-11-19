@@ -26,7 +26,7 @@ This package provides a reproducible, end-to-end audio replay, evaluation, and s
    - Includes frame buffering delay (~46.4ms for 2048-sample reads at 44.1kHz), plus the explicit tail collection delay (~300ms) when post-impulse tail scheduling is enabled.
 4. **Execution Mode**:
    - **TFLite Model**: All configurations execute real float32 inference using the bundled `app/src/main/assets/yamnet.tflite` model (`[15600]` input, `[1, 521]` output). Zero mocks are used for ML classification.
-   - **Pipeline Simulation**: The capture loop, ring buffer, and tail-wait scheduling simulate `AudioSensorService.kt`.
+   - **Pipeline Simulation**: The capture loop, ring buffer, and tail-wait scheduling simulate `AudioSensorService.kt` and `DetectionScheduler.kt` in Python; they evaluate algorithmic timing, buffering, and label selection, but do not represent physical on-device Android execution.
 
 ---
 
@@ -80,7 +80,7 @@ python3 -m eval.run_eval --mode tightened --output eval/raw_benchmark_results.js
 - **Corpus Seed**: `42`
 - **Boundary Suite SHA-256**: `ec7537d470054658d5cf65c26b63ca00bbcd920257c770c0ba13689f92ae0755` (40.0s)
 - **Hard Negatives SHA-256**: `3fb30f80bce382dcdaeead65b533f81e01861788c03792b0c36cb077d85e7834` (46.0s)
-- **Tested Detector Head SHA**: `5d87d30affb9363053a525321b9af8b711273912`
+- **Tested Detector Head SHA**: Dynamic git provenance via `--commit-sha` (resolves to current `git rev-parse HEAD`)
 
 | Configuration | Event Recall | False Alert Rate | Hard Neg FPs | Latency p50 | Latency p90 |
 |---|:---:|:---:|:---:|:---:|:---:|

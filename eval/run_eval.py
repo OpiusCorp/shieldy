@@ -6,6 +6,7 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 import argparse
 import json
+import subprocess
 import sys
 from typing import Dict, Any
 import numpy as np
@@ -16,6 +17,20 @@ from eval.detector_pipeline import AudioDetectorPipeline
 from eval.synthetic_audio import SyntheticAudioGenerator, compute_audio_sha256
 from eval.eval_harness import EvaluationHarness, MetricSummary
 from eval.manifest import EvaluationManifest
+
+
+def get_current_git_sha() -> str:
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        return res.stdout.strip()
+    except Exception:
+        return "unversioned"
 
 
 def format_table(header: list, rows: list) -> str:
@@ -79,7 +94,14 @@ def main():
         help="Run comparative evaluation (tightened vs legacy, latest vs retrospective window)",
     )
     parser.add_argument("--output", type=str, help="Save evaluation summary to JSON file")
+    parser.add_argument(
+        "--commit-sha",
+        type=str,
+        default=None,
+        help="Git commit SHA of detector under test (defaults to git rev-parse HEAD)",
+    )
     args = parser.parse_args()
+    tested_sha = args.commit_sha or get_current_git_sha()
 
     print("======================================================================")
     print("        ECHOSHIELD ACOUSTIC DETECTOR EVALUATION & SCORING HARNESS      ")
@@ -220,7 +242,7 @@ def main():
                 "corpus_seed": 42,
                 "boundary_corpus_sha256": b_sha,
                 "hard_negatives_corpus_sha256": hn_sha,
-                "tested_detector_head_sha": "af6564b",
+                "tested_detector_head_sha": tested_sha,
                 "model_executed": "yamnet.tflite (unquantized float32, bundled in app/src/main/assets)",
                 "class_map_source": "app/src/main/assets/yamnet_class_map.csv",
                 "latency_definition": "trigger_timestamp_ms - ground_truth_impulse_onset_ms (includes frame capture buffer read and post-impulse tail wait if enabled)",
@@ -234,9 +256,12 @@ def main():
                     for lbl in sorted(all_labels)
                 },
             }
-            with open(args.output, "w") as f:
-                json.dump(out_data, f, indent=2)
-            print(f"\nSaved comparative metrics to {args.output}")
+            try:
+                with open(args.output, "w") as f:
+                    json.dump(out_data, f, indent=2)
+                print(f"\nSaved comparative metrics to {args.output}")
+            except Exception as e:
+                print(f"\n[Warning] Could not write output to {args.output}: {e}")
 
         return
 
@@ -281,9 +306,12 @@ def main():
             "boundary_metrics": b_m.boundary_metrics,
             "hard_negative_breakdown": hn_m.hard_negative_breakdown,
         }
-        with open(args.output, "w") as f:
-            json.dump(out_data, f, indent=2)
-        print(f"\nSaved metrics output to {args.output}")
+        try:
+            with open(args.output, "w") as f:
+                json.dump(out_data, f, indent=2)
+            print(f"\nSaved metrics output to {args.output}")
+        except Exception as e:
+            print(f"\n[Warning] Could not write output to {args.output}: {e}")
 
 
 if __name__ == "__main__":

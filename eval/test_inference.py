@@ -177,5 +177,5 @@ def test_scheduler_sustained_impulses_timeout_bounded():
     for step in range(1, 10):
         t = 2000.0 + (step * 40.0)
         pipeline.process_frame(impulse_frame, t)
-        # Deadline MUST remain anchored to first impulse (2600ms)
+        # Deadline MUST remain anchored to first impulse (2450ms)
         assert pipeline.tail_deadline_ms == initial_deadline
