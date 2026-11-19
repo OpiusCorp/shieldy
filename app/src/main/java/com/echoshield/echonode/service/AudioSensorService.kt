@@ -1,5 +1,6 @@
 package com.echoshield.echonode.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -16,6 +18,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.echoshield.echonode.MainActivity
 import com.echoshield.echonode.R
 import com.echoshield.echonode.core.Triangulation
@@ -456,6 +459,11 @@ class AudioSensorService : Service() {
     )
 
     private fun initializeAudioRecord(): AudioRecordConfig? {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED) {
+            Log.w(TAG, "Microphone permission unavailable; audio capture not started")
+            return null
+        }
         for (rate in CANDIDATE_SAMPLE_RATES) {
             val minBufferSizeBytes = AudioRecord.getMinBufferSize(rate, CHANNEL_CONFIG, AUDIO_FORMAT)
             if (minBufferSizeBytes <= 0 || minBufferSizeBytes == AudioRecord.ERROR || minBufferSizeBytes == AudioRecord.ERROR_BAD_VALUE) {
