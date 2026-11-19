@@ -1,0 +1,112 @@
+{
+  "benchmark_type": "synthetic_calibrated",
+  "model_executed": "yamnet.tflite (unquantized, bundled float32)",
+  "tested_detector_head_sha": "5d87d30affb9363053a525321b9af8b711273912",
+  "eval_commit_sha": "be06d8b",
+  "mode": "tightened",
+  "event_recall_pct": 100.0,
+  "total_threat_events": 6,
+  "true_positives": 6,
+  "false_negatives": 0,
+  "false_alerts_per_hour": 313.04347826086956,
+  "false_positives": 4,
+  "total_negative_hours": 0.012777777777777779,
+  "latency_p50_ms": 26.43990929716074,
+  "latency_p90_ms": 43.458049886678396,
+  "latency_min_ms": 15.61224489802953,
+  "latency_max_ms": 43.560090703063906,
+  "boundary_metrics": {
+    "0ms": {
+      "total": 1,
+      "detected": 1,
+      "recall_pct": 100.0,
+      "avg_latency_ms": 43.356009070292885
+    },
+    "50ms": {
+      "total": 1,
+      "detected": 1,
+      "recall_pct": 100.0,
+      "avg_latency_ms": 30.544217687098353
+    },
+    "195ms": {
+      "total": 1,
+      "detected": 1,
+      "recall_pct": 100.0,
+      "avg_latency_ms": 15.61224489802953
+    },
+    "390ms": {
+      "total": 1,
+      "detected": 1,
+      "recall_pct": 100.0,
+      "avg_latency_ms": 43.560090703063906
+    },
+    "405ms": {
+      "total": 1,
+      "detected": 1,
+      "recall_pct": 100.0,
+      "avg_latency_ms": 19.308390022837557
+    },
+    "950ms": {
+      "total": 1,
+      "detected": 1,
+      "recall_pct": 100.0,
+      "avg_latency_ms": 22.335600907223125
+    }
+  },
+  "hard_negative_breakdown": {
+    "door_slam": {
+      "total_events": 2,
+      "false_alerts": 1
+    },
+    "hand_clap": {
+      "total_events": 2,
+      "false_alerts": 2
+    },
+    "balloon_pop": {
+      "total_events": 1,
+      "false_alerts": 1
+    },
+    "dropped_book": {
+      "total_events": 1,
+      "false_alerts": 0
+    },
+    "speech_shout": {
+      "total_events": 1,
+      "false_alerts": 0
+    }
+  },
+  "alerts": [
+    {
+      "timestamp_ms": 8034.104308390047,
+      "confidence": 0.6301227807998657,
+      "top_label": "Cap gun",
+      "gunshot_label": "Gunshot, gunfire",
+      "gate_reason": "RMS",
+      "latency_ms": 29.047619047619264
+    },
+    {
+      "timestamp_ms": 14024.85260770982,
+      "confidence": 0.2172781229019165,
+      "top_label": "Clang",
+      "gunshot_label": "Gunshot, gunfire",
+      "gate_reason": "RMS",
+      "latency_ms": 24.671201814058804
+    },
+    {
+      "timestamp_ms": 32043.53741496619,
+      "confidence": 0.611286997795105,
+      "top_label": "Cap gun",
+      "gunshot_label": "Gunshot, gunfire",
+      "gate_reason": "RMS",
+      "latency_ms": 42.38095238095411
+    },
+    {
+      "timestamp_ms": 38034.28571428555,
+      "confidence": 0.15631073713302612,
+      "top_label": "Explosion",
+      "gunshot_label": "Gunshot, gunfire",
+      "gate_reason": "RMS",
+      "latency_ms": 31.723356009068084
+    }
+  ]
+}
